@@ -1,14 +1,21 @@
 # blankscreen —— 关屏但不睡眠
 # 用法:
 #   make            构建 CLI + 菜单栏 App（universal binary）
-#   make install    安装 CLI 到 /usr/local/bin，App 到 /Applications
+#   make install    安装 CLI 到 Homebrew 前缀（arm64 用 /opt/homebrew/bin，Intel 用 /usr/local/bin），App 到 /Applications
 #   make uninstall  卸载以上两者（含 launchd 登录项）
 #   make dev-tools  编译开发调试小工具到 build/dev-tools/
 #   make clean
 
 CC      = swiftc
 TARGETS = arm64-apple-macosx13.0 x86_64-apple-macosx13.0
-BINDIR  = /usr/local/bin
+# 安装前缀：Apple Silicon (arm64) 走 /opt/homebrew/bin，Intel 走 /usr/local/bin，
+# 与 Homebrew 默认前缀一致，避免同一机器出现两份二进制导致 `which` 混淆。
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M), arm64)
+BINDIR  := /opt/homebrew/bin
+else
+BINDIR  := /usr/local/bin
+endif
 APPSRC  = build/BlankScreenBar.app
 DEST    = /Applications/BlankScreenBar.app
 

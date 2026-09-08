@@ -41,7 +41,7 @@ $ blankscreen on      # 恢复显示（SSH 远程执行同样有效）
 ```bash
 git clone https://github.com/Mihooni/blankscreen.git
 cd blankscreen
-./install.sh              # CLI 装到 /usr/local/bin，App 装到 /Applications
+./install.sh              # CLI 装到 Homebrew 前缀（Apple 芯片 /opt/homebrew/bin，Intel /usr/local/bin），App 装到 /Applications
 ```
 
 `./install.sh --cli-only` 可只装命令行工具。
@@ -51,7 +51,7 @@ cd blankscreen
 ```bash
 xattr -dr com.apple.quarantine BlankScreenBar.app   # 清除 Gatekeeper 隔离标记
 cp -R BlankScreenBar.app /Applications/
-sudo cp blankscreen /usr/local/bin/
+# Apple 芯片: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
 ```
 
 > App 为 ad-hoc 签名（无付费开发者证书）。首次打开：右键 → 打开；或按上面命令清除隔离标记。

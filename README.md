@@ -41,7 +41,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 ```bash
 git clone https://github.com/Mihooni/blankscreen.git
 cd blankscreen
-./install.sh              # installs CLI to /usr/local/bin + app to /Applications
+./install.sh              # installs CLI to your Homebrew prefix (/opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) + app to /Applications
 ```
 
 `./install.sh --cli-only` skips the menu bar app.
@@ -51,7 +51,7 @@ cd blankscreen
 ```bash
 xattr -dr com.apple.quarantine BlankScreenBar.app   # unsigned build: clear Gatekeeper flag
 cp -R BlankScreenBar.app /Applications/
-sudo cp blankscreen /usr/local/bin/
+# Apple Silicon: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
 ```
 
 > The app is ad-hoc signed (no paid developer certificate). First launch: right-click → Open, or clear the quarantine attribute as shown above.
