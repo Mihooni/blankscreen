@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>BlankScreen 安装说明</title></head>
+<body style="font-family:-apple-system,Helvetica,sans-serif;font-size:13px;line-height:1.6;">
+<h2>BlankScreen —— 关屏但不睡眠</h2>
+<p>安装器会放入两项：</p>
+<ul>
+  <li><b>BlankScreenBar.app</b> → <code>/Applications</code>（菜单栏常驻，热键零授权）</li>
+  <li><b>blankscreen</b> 命令行工具 → <code>/usr/local/bin</code></li>
+</ul>
+<p>安装完成后菜单栏会出现一个月亮图标，点击可展开菜单。</p>
+
+<h3>使用</h3>
+<ul>
+  <li>点击菜单栏图标 → 打开菜单（开关显示 / 设置 / 热键自检 / 退出）</li>
+  <li>默认热键在「设置」里配置；热键走系统全局热键，<b>无需任何隐私授权</b></li>
+  <li>远程（SSH）可用：<code>blankscreen off</code> / <code>blankscreen on</code></li>
+</ul>
+
+<h3>关于签名</h3>
+<p>本安装包<b>未使用付费开发者证书签名</b>（ad-hoc）。若首次打开 App 被系统拦截，
+在「访达」中对 BlankScreenBar.app 右键 → 打开 即可；安装脚本已尝试自动清除隔离标记。</p>
+
+<h3>卸载</h3>
+<p>源码方式：<code>make uninstall</code><br>
+手动方式：删除 <code>/Applications/BlankScreenBar.app</code> 与
+<code>/usr/local/bin/blankscreen</code>，可选清理
+<code>~/Library/Application Support/blankscreen</code>（配置与日志）。</p>
+</body>
+</html>

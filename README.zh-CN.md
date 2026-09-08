@@ -36,7 +36,17 @@ $ blankscreen on      # 恢复显示（SSH 远程执行同样有效）
 
 ## 安装
 
-**方式 A —— 源码构建**（需 Xcode Command Line Tools）：
+**方式 A —— 安装包（推荐）**：从 [Releases](../../releases) 下载
+`BlankScreen-<版本号>.pkg`，双击即可，一步装好两项：
+
+| 安装位置 | 内容 |
+|---|---|
+| `/Applications/BlankScreenBar.app` | 菜单栏 App |
+| `/usr/local/bin/blankscreen` | 命令行工具 |
+
+安装器会自动清除 Gatekeeper 隔离标记并启动 App，无需任何手工操作。
+
+**方式 B —— 源码构建**（需 Xcode Command Line Tools）：
 
 ```bash
 git clone https://github.com/Mihooni/blankscreen.git
@@ -44,9 +54,9 @@ cd blankscreen
 ./install.sh              # CLI 装到 Homebrew 前缀（Apple 芯片 /opt/homebrew/bin，Intel /usr/local/bin），App 装到 /Applications
 ```
 
-`./install.sh --cli-only` 可只装命令行工具。
+`./install.sh --cli-only` 可只装命令行工具。`make pkg` 可在本地生成同样的安装包。
 
-**方式 B —— 下载预编译包**：从 [Releases](../../releases) 下载 zip，然后：
+**方式 C —— 下载预编译包**：从 [Releases](../../releases) 下载 zip，然后：
 
 ```bash
 xattr -dr com.apple.quarantine BlankScreenBar.app   # 清除 Gatekeeper 隔离标记
@@ -54,7 +64,9 @@ cp -R BlankScreenBar.app /Applications/
 # Apple 芯片: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
 ```
 
-> App 为 ad-hoc 签名（无付费开发者证书）。首次打开：右键 → 打开；或按上面命令清除隔离标记。
+> **未使用付费开发者证书签名。** macOS 可能拒绝打开下载来的 `.pkg`（提示"身份不明的开发者"）。
+> 此时对 `.pkg` 右键 → **打开**，再确认即可。App 首次启动同理——不过安装器已自动清除了
+> App 的隔离标记，装完直接就能正常打开。
 
 ## 使用
 

@@ -36,7 +36,18 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 
 ## Install
 
-**Option A — build from source** (needs Xcode Command Line Tools):
+**Option A — installer (recommended).** Download `BlankScreen-<version>.pkg` from
+[Releases](../../releases) and double-click it. One step, both pieces installed:
+
+| Installed to | Item |
+|---|---|
+| `/Applications/BlankScreenBar.app` | menu bar app |
+| `/usr/local/bin/blankscreen` | CLI |
+
+The installer also clears the Gatekeeper quarantine flag and launches the app for you,
+so there is nothing to do by hand.
+
+**Option B — build from source** (needs Xcode Command Line Tools):
 
 ```bash
 git clone https://github.com/Mihooni/blankscreen.git
@@ -44,9 +55,9 @@ cd blankscreen
 ./install.sh              # installs CLI to your Homebrew prefix (/opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) + app to /Applications
 ```
 
-`./install.sh --cli-only` skips the menu bar app.
+`./install.sh --cli-only` skips the menu bar app. `make pkg` builds the same installer locally.
 
-**Option B — download a prebuilt zip** from [Releases](../../releases), then:
+**Option C — download a prebuilt zip** from [Releases](../../releases), then:
 
 ```bash
 xattr -dr com.apple.quarantine BlankScreenBar.app   # unsigned build: clear Gatekeeper flag
@@ -54,7 +65,11 @@ cp -R BlankScreenBar.app /Applications/
 # Apple Silicon: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
 ```
 
-> The app is ad-hoc signed (no paid developer certificate). First launch: right-click → Open, or clear the quarantine attribute as shown above.
+> **Not signed with a paid developer certificate.** macOS may refuse to open the
+> downloaded `.pkg` ("unidentified developer"). If that happens, right-click the
+> `.pkg` → **Open**, then confirm. Same for the app on first launch — though the
+> installer already clears its quarantine flag, so the app should open normally
+> right after installing.
 
 ## Usage
 

@@ -1,0 +1,19 @@
+#!/bin/bash
+# 安装后脚本（以 root 运行）
+set -e
+
+APP="/Applications/BlankScreenBar.app"
+CLI="/usr/local/bin/blankscreen"
+
+# ad-hoc 签名的 App 会带隔离标记，首次打开会被 Gatekeeper 拦下；这里直接清掉
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+chmod 755 "$CLI" 2>/dev/null || true
+
+# 以当前登录用户启动菜单栏 App（安装器本身是 root，必须切换用户上下文）
+CU=$(stat -f "%Su" /dev/console 2>/dev/null || true)
+if [ -n "$CU" ] && [ "$CU" != "root" ] && [ -d "$APP" ]; then
+  su - "$CU" -c "open -a BlankScreenBar" 2>/dev/null || true
+fi
+
+exit 0
