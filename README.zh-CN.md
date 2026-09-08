@@ -106,6 +106,14 @@ make clean
 
 源码结构：`Sources/blankscreen.swift`（CLI）、`Sources/BlankScreenBar.swift`（菜单栏 App）、`dev-tools/`（开发期用的截帧 / 亮度 / 探测辅助工具）。
 
+## 已知限制
+
+- **外接显示器不会一起变暗。** 亮度只作用于主显示器（`CGMainDisplayID`）。接了外接屏时，
+  内置屏会变黑而外接屏仍正常显示。要覆盖所有屏幕需依赖 DDC/CI，而 Apple 芯片上这条路不可靠。
+
+- 屏幕**并非断电**——这是刻意设计。背光被设为 0，帧缓冲仍在渲染，因此屏幕共享 / 远程桌面
+  仍能正常取帧。真正的显示器休眠会中断远程访问，详见[工作原理](#工作原理)。
+
 ## 许可
 
 [MIT](LICENSE)

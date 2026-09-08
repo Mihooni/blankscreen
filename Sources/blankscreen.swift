@@ -52,6 +52,32 @@ let exePath = String(cString: execBuf)
     try? p.run(); p.waitUntilExit(); return p.terminationStatus
 }
 
+// MARK: - 进程归属校验
+// 仅用 kill(pid,0) 判断进程存活是不够的：进程退出后 pid 会被系统复用，
+// 此时向该 pid 发 SIGUSR1 会打到无关进程上（SIGUSR1 默认动作是终止！）。
+// 因此必须核对 pid 对应的可执行文件路径确实属于 blankscreen。
+func procPath(_ pid: Int32) -> String? {
+    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+    let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+    return n > 0 ? String(cString: buf) : nil
+}
+/// 取不到路径时返回 true（保持原有行为，避免因权限等因素误判导致功能不可用）
+func isOurs(_ pid: Int32) -> Bool {
+    guard let p = procPath(pid) else { return true }
+    // 同时覆盖 /opt/homebrew/bin/blankscreen 与 .../BlankScreenBar.app/.../BlankScreenBar
+    return p.lowercased().contains("blankscreen")
+}
+
+// MARK: - 轮询等待（比固定 usleep 可靠：慢机器上不会误判超时）
+func waitUntil(timeout: TimeInterval, _ predicate: () -> Bool) -> Bool {
+    let end = Date().addingTimeInterval(timeout)
+    while Date() < end {
+        if predicate() { return true }
+        usleep(100_000)
+    }
+    return predicate()
+}
+
 // MARK: - 配置（常驻服务经 launchd 启动，无法传命令行参数，故持久化）
 // 与 BlankScreenBar.app 共用同一个 config.json；字段全部可缺省，旧版文件仍能读取
 let MOD_CTRL: UInt64  = 1 << 18
@@ -175,16 +201,19 @@ var cliSignalTerm = false
 // MARK: - 形态一：一次性 daemon
 func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     let cfg = loadConfig()
-    let restoreTarget = cfg.restoreFixed ?? (max(readBrightness(), 0.0) > 0.001 ? max(readBrightness(), 0.0) : 0.5)
-    let original = max(readBrightness(), 0.0)
-    let saved = original > 0.001 ? original : 0.5
+    // 只读一次亮度：重复调用既浪费，又可能因并发自动亮度调整得到不一致的值
+    let current = max(readBrightness(), 0.0)
+    let saved = current > 0.001 ? current : 0.5          // 已是 0（如上次遗留）时给个可用兜底
+    let restoreTarget = cfg.restoreFixed ?? saved
     try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
     try? String(ProcessInfo.processInfo.processIdentifier).write(toFile: pidFile, atomically: true, encoding: .utf8)
     log("daemon 启动 pid=\(ProcessInfo.processInfo.processIdentifier) 原亮度=\(saved)")
 
     let caff = Process()
     caff.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-    caff.arguments = ["-di"]
+    // -w 自身 pid：本进程一旦退出（哪怕被 SIGKILL），caffeinate 也会自动退出，
+    // 杜绝残留的孤儿 caffeinate 继续持有「禁止显示器睡眠」断言。
+    caff.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
     try? caff.run()
 
     var restored = false
@@ -248,6 +277,19 @@ func runService(keyCode: Int64) -> Never {
     var saved: Float = 0.5
     var caff: Process?
     var pinTimer: Timer?
+    var timeoutTimer: Timer?     // 兜底：热键失效/被占用时也能自动恢复
+
+    func restore() {
+        guard blacked else { return }
+        blacked = false
+        pinTimer?.invalidate(); pinTimer = nil
+        timeoutTimer?.invalidate(); timeoutTimer = nil
+        let target = cfg.restoreFixed ?? saved
+        log("service 恢复显示 \(target)")
+        restoreBrightness(target)
+        caff?.terminate(); caff = nil
+        try? fm.removeItem(atPath: stateFile)
+    }
 
     func blackout() {
         guard !blacked else { return }
@@ -257,7 +299,8 @@ func runService(keyCode: Int64) -> Never {
         blacked = true
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        c.arguments = ["-di"]
+        // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
+        c.arguments = ["-di", "-w", String(myPid)]
         try? c.run()
         caff = c
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
@@ -265,18 +308,18 @@ func runService(keyCode: Int64) -> Never {
         }
         RunLoop.main.add(t, forMode: .common)
         pinTimer = t
-        log("service 进入黑屏，原亮度 \(saved)")
-    }
-
-    func restore() {
-        guard blacked else { return }
-        blacked = false
-        pinTimer?.invalidate(); pinTimer = nil
-        let target = cfg.restoreFixed ?? saved
-        log("service 恢复显示 \(target)")
-        restoreBrightness(target)
-        caff?.terminate(); caff = nil
-        try? fm.removeItem(atPath: stateFile)
+        // 兜底超时（与菜单栏 App 一致）：这是热键注册失败/被占用时唯一的自动恢复手段，
+        // 缺失会导致「黑屏后无任何自动恢复途径」的永久黑屏。
+        timeoutTimer?.invalidate(); timeoutTimer = nil
+        if cfg.timeout > 0 {
+            let tt = Timer.scheduledTimer(withTimeInterval: cfg.timeout, repeats: false) { _ in
+                log("兜底超时 \(Int(cfg.timeout))s，自动恢复")
+                restore()
+            }
+            RunLoop.main.add(tt, forMode: .common)
+            timeoutTimer = tt
+        }
+        log("service 进入黑屏，原亮度 \(saved)，兜底 \(Int(cfg.timeout))s")
     }
 
     func shutdown() {
@@ -313,6 +356,12 @@ func servicePid() -> Int32? {
     guard let s = try? String(contentsOfFile: serviceFile, encoding: .utf8),
           let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)),
           kill(pid, 0) == 0 else { return nil }
+    // pid 可能已被系统复用于无关进程：此时绝不能发信号（SIGUSR1 默认动作是终止）
+    guard isOurs(pid) else {
+        log("service.pid 中的 pid=\(pid) 已不属于 blankscreen（pid 被复用），清理陈旧记录")
+        try? fm.removeItem(atPath: serviceFile)
+        return nil
+    }
     return pid
 }
 func daemonRunning() -> (pid: Int32, brightness: String)? {
@@ -320,6 +369,11 @@ func daemonRunning() -> (pid: Int32, brightness: String)? {
           let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)),
           kill(pid, 0) == 0,
           let b = try? String(contentsOfFile: stateFile, encoding: .utf8) else { return nil }
+    guard isOurs(pid) else {
+        log("daemon.pid 中的 pid=\(pid) 已不属于 blankscreen（pid 被复用），清理陈旧记录")
+        try? fm.removeItem(atPath: pidFile)
+        return nil
+    }
     return (pid, b.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
@@ -450,6 +504,13 @@ case "config":
         else if args[i] == "--reset" { c = Config(); i += 1 }
         else { i += 1 }
     }
+    // 热键必须带至少一个修饰键：Carbon RegisterEventHotKey 对无修饰键组合必定注册失败，
+    // 存下来只会让热键静默失效（与菜单栏 App 的约束保持一致）。
+    if args.count > 2 && c.modFlags == 0 {
+        print("错误：全局热键必须包含至少一个修饰键，否则系统无法注册（会静默失效）。")
+        print("示例: blankscreen config --mods cmd,shift --key 0")
+        exit(1)
+    }
     if args.count > 2 { saveConfig(c); print("配置已保存: \(configFile)") }
     var m = ""
     if c.modFlags & MOD_CTRL  != 0 { m += "⌃" }
@@ -465,10 +526,11 @@ case "off":
     if let pid = servicePid() {                      // 常驻模式：命令文件 + 信号双通道
         try? "off".write(toFile: commandFile, atomically: true, encoding: .utf8)
         kill(pid, SIGUSR1)                            // 菜单栏 App 会忽略信号、只认命令文件
-        usleep(900_000)
-        print(fm.fileExists(atPath: stateFile)
-              ? "已进入黑屏（常驻服务 pid=\(pid)）恢复: 热键 ⌃⌥⌘B 或 blankscreen on"
-              : "已发送进入黑屏指令")
+        // 轮询等待状态落地（固定 usleep 在慢机器上会误判失败）
+        let ok = waitUntil(timeout: 3.0) { fm.fileExists(atPath: stateFile) }
+        print(ok
+              ? "已进入黑屏（常驻服务 pid=\(pid)）恢复: 热键或 blankscreen on"
+              : "已发送进入黑屏指令（3s 内未确认，请查看 \(logPath)）")
         exit(0)
     }
     if let r = daemonRunning() { print("已在黑屏模式 (pid \(r.pid))，原亮度 \(r.brightness)"); exit(0) }
@@ -480,7 +542,7 @@ case "off":
     p.arguments = dargs
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
     try? p.run()
-    usleep(700_000)
+    _ = waitUntil(timeout: 3.0) { daemonRunning() != nil }
     if let r = daemonRunning() {
         print("已进入黑屏模式 pid=\(r.pid) 原亮度=\(r.brightness)")
         print("恢复方式: 热键 ⌃⌥⌘B  /  blankscreen on  /  远程执行同一命令")
@@ -493,13 +555,13 @@ case "on":
     if let pid = servicePid() {
         try? "on".write(toFile: commandFile, atomically: true, encoding: .utf8)
         kill(pid, SIGUSR2)
-        usleep(900_000)
-        print(fm.fileExists(atPath: stateFile) ? "恢复指令已发送（仍在黑屏，请查看日志）" : "已恢复显示")
+        let ok = waitUntil(timeout: 3.0) { !fm.fileExists(atPath: stateFile) }
+        print(ok ? "已恢复显示" : "恢复指令已发送（3s 内仍在黑屏，请查看 \(logPath)）")
         exit(0)
     }
     guard let r = daemonRunning() else { print("当前不在黑屏模式"); exit(0) }
     kill(r.pid, SIGTERM)
-    usleep(700_000)
+    _ = waitUntil(timeout: 3.0) { daemonRunning() == nil }
     print("已恢复显示，亮度 \(r.brightness)，当前实际亮度 \(readBrightness())")
 
 case "status":

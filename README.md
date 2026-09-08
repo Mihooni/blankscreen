@@ -106,6 +106,17 @@ make clean
 
 Source layout: `Sources/blankscreen.swift` (CLI), `Sources/BlankScreenBar.swift` (menu bar app), `dev-tools/` (screenshot/brightness/probe helpers used during development).
 
+## Known limitations
+
+- **External displays are not dimmed.** Brightness is only set on the main display
+  (`CGMainDisplayID`). With an external monitor attached, the built-in display goes dark
+  while the external one keeps showing its image. Covering every display would need
+  DDC/CI, which Apple Silicon does not expose reliably.
+
+- The panel is **not powered down** — this is intentional. Backlight is driven to 0, so
+  the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep
+  working. True display sleep would break remote access; see [How it works](#how-it-works).
+
 ## License
 
 [MIT](LICENSE)

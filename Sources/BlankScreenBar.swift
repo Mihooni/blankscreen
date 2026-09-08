@@ -227,7 +227,8 @@ final class ScreenController {
         blacked = true
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        c.arguments = ["-di"]
+        // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
+        c.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
         try? c.run()
         caff = c
         setBrightness(0.0)
