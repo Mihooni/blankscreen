@@ -21,6 +21,8 @@ let serviceFile = base + "/service.pid"
 let configFile = base + "/config.json"
 let logPath = base + "/blankscreen.log"
 let commandFile = base + "/command"        // CLI -> App 的指令(off/on/toggle)，比信号可靠
+// 关屏被拒绝（电量过低 / 亮度接口不可用）时的回传：CLI off 读完即清
+let rejectFile = base + "/reject"
 let barPlist = home + "/Library/LaunchAgents/com.blankscreen.bar.plist"
 
 /// 以 launchd 实际注册状态为准：plist 文件存在但没 bootstrap 时，开机并不会启动
@@ -78,8 +80,9 @@ struct Config: Codable {
     var modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD   // 默认 ⌃⌥⌘
     var timeout: Double = 43200              // 黑屏后自动恢复兜底，秒；0 = 不启用
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
+    var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -87,6 +90,7 @@ struct Config: Codable {
         modFlags = try c.decodeIfPresent(UInt64.self, forKey: .modFlags) ?? (MOD_CTRL | MOD_ALT | MOD_CMD)
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
+        batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
     }
 }
 let MOD_CTRL: UInt64  = 1 << 18
@@ -183,17 +187,71 @@ let dsHandle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framewo
 typealias DSGet = @convention(c) (UInt32, UnsafeMutablePointer<Float>) -> Int32
 typealias DSSet = @convention(c) (UInt32, Float) -> Int32
 
+var dsAvailable: Bool {
+    guard let h = dsHandle else { return false }
+    return dlsym(h, "DisplayServicesGetBrightness") != nil
+        && dlsym(h, "DisplayServicesSetBrightness") != nil
+}
+
 func readBrightness() -> Float {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
     let f = unsafeBitCast(p, to: DSGet.self)
     var v: Float = -1
     return f(CGMainDisplayID(), &v) == 0 ? v : -1
 }
-func setBrightness(_ v: Float) {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return }
-    _ = unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v)
+// 返回 false = 设置失败（实测成功时返回 0）。失败必须可见，否则用户会以为关屏成功、
+// 实际屏幕还亮着。
+@discardableResult
+func setBrightness(_ v: Float) -> Bool {
+    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
+    return unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v) == 0
 }
-func restoreBrightness(_ v: Float) { setBrightness(v); usleep(300_000); setBrightness(v) }
+@discardableResult
+func restoreBrightness(_ v: Float) -> Bool {
+    let a = setBrightness(v); usleep(300_000); let b = setBrightness(v)
+    return a || b
+}
+
+// MARK: - 电池状态（pmset -g batt，免授权；与 CLI 同一判定口径）
+// 仅「电池供电且正在放电」视为耗尽风险：插电时电量再低也不会耗尽。
+struct Battery { var onBattery = false, discharging = false, percent = 100 }
+
+func batteryStatus() -> Battery {
+    var b = Battery()
+    // 测试钩子：BS_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"（见 CLI 同名实现）
+    if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_BATTERY"] {
+        let parts = sim.lowercased().split(separator: ",").map(String.init)
+        if let p = parts.first, let v = Int(p), (0...100).contains(v) {
+            b.percent = v
+            b.onBattery = parts.contains("batt")
+            b.discharging = parts.contains("discharging")
+            return b
+        }
+    }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    p.arguments = ["-g", "batt"]
+    p.standardInput = FileHandle.nullDevice
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+    do { try p.run() } catch { return b }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    guard let out = String(data: data, encoding: .utf8), !out.isEmpty else { return b }
+    b.onBattery = out.contains("Battery Power")
+    b.discharging = out.range(of: "discharging", options: .caseInsensitive) != nil
+    for tok in out.split(whereSeparator: { " \t\n;".contains($0) }) {
+        if tok.hasSuffix("%"), let v = Int(tok.dropLast()) { b.percent = v; break }
+    }
+    return b
+}
+
+func notifyUser(_ msg: String) {
+    let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""]
+    try? p.run()
+}
 
 var gotTerminate = false
 // SIGTERM/SIGINT 由传统 handler 置位，再由 Timer 在主线程安全收尾
@@ -210,6 +268,7 @@ final class ScreenController {
     // source 交付不可靠（实测延迟数秒且乱序），NSTimer 挂 .common 模式则稳定
     var pinTimer: Timer?
     var timeoutTimer: Timer?
+    var battTimer: Timer?
     var cmdTimer: Timer?
     var signalSources: [DispatchSourceSignal] = []
     var configMtime: Date? = nil
@@ -219,27 +278,69 @@ final class ScreenController {
     // MARK: 状态
     var isBlacked: Bool { fm.fileExists(atPath: stateFile) }
 
-    func blackout() {
-        guard !blacked else { return }
+    /// 记录、通知并回传拒绝原因（CLI 从 rejectFile 读到后会给用户明确提示）
+    private func reject(_ m: String) -> Bool {
+        blog("bar: \(m)")
+        notifyUser(m)
+        try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
+        onStateChange?()
+        return false
+    }
+
+    /// 返回 false = 没能进入黑屏（亮度接口不可用或电量过低）
+    @discardableResult
+    func blackout() -> Bool {
+        guard !blacked else { return true }
+        guard dsAvailable else {
+            return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
+        }
+        // 电量下限：黑屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
+        if cfg.batteryFloor > 0 {
+            let b = batteryStatus()
+            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
+                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）")
+            }
+        }
+        try? fm.removeItem(atPath: rejectFile)
         let cur = max(readBrightness(), 0)
         saved = cur > 0.001 ? cur : saved
         try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
         blacked = true
+        if !setBrightness(0.0) { blog("bar: 警告：首次设置亮度 0 失败") }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
         c.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
         try? c.run()
         caff = c
-        setBrightness(0.0)
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             if self?.blacked == true { setBrightness(0.0) }
         }
         RunLoop.main.add(t, forMode: .common)
         pinTimer = t
         scheduleTimeout()
-        blog("bar: 进入黑屏，原亮度 \(saved)")
+        scheduleBatteryGuard()
+        blog("bar: 进入黑屏，原亮度 \(saved)，电量下限 \(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : "不限")")
         onStateChange?()
+        return true
+    }
+
+    // 黑屏期间每 30s 复查电量，跌破下限立即恢复；这是硬保护，
+    // 即使用户想保持黑屏也不放行——耗尽电池的代价比「被打断」大得多
+    func scheduleBatteryGuard() {
+        battTimer?.invalidate(); battTimer = nil
+        guard cfg.batteryFloor > 0 else { return }
+        let t = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self = self, self.blacked else { return }
+            let b = batteryStatus()
+            guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else { return }
+            let m = "电量 \(b.percent)% 已达下限 \(self.cfg.batteryFloor)%，自动恢复显示"
+            blog("bar: \(m)")
+            notifyUser(m)
+            self.restore()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        battTimer = t
     }
 
     func restore() {
@@ -247,6 +348,7 @@ final class ScreenController {
         blacked = false
         pinTimer?.invalidate(); pinTimer = nil
         timeoutTimer?.invalidate(); timeoutTimer = nil
+        battTimer?.invalidate(); battTimer = nil
         let target = cfg.restoreFixed ?? saved
         blog("bar: 恢复显示 \(target)")
         restoreBrightness(target)
@@ -255,7 +357,7 @@ final class ScreenController {
         onStateChange?()
     }
 
-    func toggle() { blacked ? restore() : blackout() }
+    func toggle() { if blacked { restore() } else { _ = blackout() } }
 
     func scheduleTimeout() {
         timeoutTimer?.invalidate(); timeoutTimer = nil
@@ -426,7 +528,7 @@ final class ScreenController {
             let keyChanged = newCfg.keyCode != cfg.keyCode || newCfg.modFlags != cfg.modFlags
             cfg = newCfg
             if keyChanged { installHotkey() }
-            if blacked { scheduleTimeout() }
+            if blacked { scheduleTimeout(); scheduleBatteryGuard() }
             blog("bar: 配置已自动重载 \(hotkeyText(cfg))")
         }
         configMtime = m
@@ -463,6 +565,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var keyPop: NSPopUpButton!
     private var hkLabel: NSTextField!
     private var timeoutPop: NSPopUpButton!
+    private var batteryPop: NSPopUpButton!
     private var restorePop: NSPopUpButton!
     private var restoreSlider: NSSlider!
     private var restoreValueLabel: NSTextField!
@@ -475,6 +578,10 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         ("30 分钟", 1800), ("1 小时", 3600), ("2 小时", 7200),
         ("4 小时", 14400), ("8 小时", 28800), ("12 小时", 43200)
     ]
+    private let batteryChoices: [(String, Int)] = [
+        ("不限制", 0), ("50%", 50), ("30%", 30),
+        ("20%（推荐）", 20), ("15%", 15), ("10%", 10)
+    ]
 
     func show() {
         if window == nil { window = build() }
@@ -484,7 +591,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     }
 
     private func build() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 585),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 660),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "BlankScreen 设置"
         w.delegate = self
@@ -534,6 +641,15 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(row("黑屏后", timeoutPop))
         let tip = wrapLabel("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。")
         root.addArrangedSubview(tip)
+
+        // —— 电量下限
+        root.addArrangedSubview(section("电量保护"))
+        batteryPop = NSPopUpButton(frame: .zero, pullsDown: false)
+        batteryPop.addItems(withTitles: batteryChoices.map { $0.0 })
+        batteryPop.target = self; batteryPop.action = #selector(onBatteryChanged(_:))
+        root.addArrangedSubview(row("低于", batteryPop))
+        let battTip = wrapLabel("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。")
+        root.addArrangedSubview(battTip)
 
         // —— 恢复亮度
         root.addArrangedSubview(section("恢复后的亮度"))
@@ -605,6 +721,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         hkLabel.stringValue = "当前: " + hotkeyText(cfg) + "　（设置即时生效）"
         timeoutPop.selectItem(at: timeoutChoices.firstIndex { $0.1 == cfg.timeout }
                               ?? timeoutChoices.firstIndex { $0.1 == 43200 }!)
+        let floor = cfg.batteryFloor
+        batteryPop.selectItem(at: batteryChoices.firstIndex { $0.1 == floor }
+                              ?? batteryChoices.firstIndex { $0.1 == 20 }!)
         let fixed = cfg.restoreFixed
         restorePop.selectItem(at: fixed == nil ? 0 : 1)
         restoreSlider.isEnabled = fixed != nil
@@ -640,6 +759,10 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         cfg.timeout = timeoutChoices[timeoutPop.indexOfSelectedItem].1
         commit()
     }
+    @objc private func onBatteryChanged(_ sender: Any?) {
+        cfg.batteryFloor = batteryChoices[batteryPop.indexOfSelectedItem].1
+        commit()
+    }
     @objc private func onRestoreModeChanged(_ sender: Any?) {
         if restorePop.indexOfSelectedItem == 0 { cfg.restoreFixed = nil }
         else { cfg.restoreFixed = Float(restoreSlider.doubleValue / 100) }
@@ -655,7 +778,10 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         saveConfig(cfg)
         ctl.cfg = cfg
         ctl.reloadHotkey()
-        if ctl.blacked { ctl.scheduleTimeout() }
+        if ctl.blacked {
+            ctl.scheduleTimeout()
+            ctl.scheduleBatteryGuard()
+        }
         hkLabel.stringValue = "当前: " + hotkeyText(cfg) + "　（设置即时生效）"
         AppDelegate.shared?.refreshUI()
     }

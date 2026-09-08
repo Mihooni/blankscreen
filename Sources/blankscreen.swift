@@ -24,6 +24,9 @@ let configFile = base + "/config.json"         // 持久化热键等配置
 let plistFile = home + "/Library/LaunchAgents/com.blankscreen.agent.plist"
 let logPath = base + "/blankscreen.log"
 let commandFile = base + "/command"        // CLI -> 菜单栏 App 的指令文件
+// 关屏被拒绝（电量过低 / 亮度接口不可用）时，常驻进程把原因写这里，
+// 让发起命令的 CLI 能读到并明确提示用户，而不是只说「指令已发送」。
+let rejectFile = base + "/reject"
 let serviceLog = base + "/service.log"
 let label = "com.blankscreen.agent"
 let fm = FileManager.default
@@ -50,6 +53,17 @@ let exePath = String(cString: execBuf)
     let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
     try? p.run(); p.waitUntilExit(); return p.terminationStatus
+}
+/// 捕获 stdout。必须先读再 waitUntilExit：子进程输出超过管道缓冲时，
+/// 先等待会与子进程互相阻塞形成死锁。
+func runCapture(_ exe: String, _ a: [String]) -> String? {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = a
+    p.standardInput = FileHandle.nullDevice
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+    do { try p.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(data: data, encoding: .utf8)
 }
 
 // MARK: - 进程归属校验
@@ -90,8 +104,9 @@ struct Config: Codable {
     var modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_CMD      // 默认 ⌃⌥⌘
     var timeout: Double = 43200                              // 一次性模式安全兜底，秒；0 = 不限
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
+    var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -99,6 +114,7 @@ struct Config: Codable {
         modFlags = try c.decodeIfPresent(UInt64.self, forKey: .modFlags) ?? (MOD_CTRL | MOD_ALT | MOD_CMD)
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
+        batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
     }
 }
 func loadConfig() -> Config {
@@ -115,17 +131,65 @@ let dsHandle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framewo
 typealias DSGet = @convention(c) (UInt32, UnsafeMutablePointer<Float>) -> Int32
 typealias DSSet = @convention(c) (UInt32, Float) -> Int32
 
+// DisplayServices 是可移除的私有框架：一旦 Apple 在新系统里拿掉它，所有亮度操作都会静默失效。
+// 显式暴露可用状态，让 status / 黑屏入口都能明确报错，而不是「命令成功但屏幕没变化」。
+var dsAvailable: Bool {
+    guard let h = dsHandle else { return false }
+    return dlsym(h, "DisplayServicesGetBrightness") != nil
+        && dlsym(h, "DisplayServicesSetBrightness") != nil
+}
+
 func readBrightness() -> Float {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
     let f = unsafeBitCast(p, to: DSGet.self)
     var v: Float = -1
     return f(CGMainDisplayID(), &v) == 0 ? v : -1
 }
-func setBrightness(_ v: Float) {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return }
-    _ = unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v)
+// 返回 false = 设置失败（实测该 API 成功时返回 0）。调用方必须据此提示用户，
+// 否则用户会以为关屏成功、实际屏幕还亮着。
+@discardableResult
+func setBrightness(_ v: Float) -> Bool {
+    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
+    return unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v) == 0
 }
-func restoreBrightness(_ v: Float) { setBrightness(v); usleep(300_000); setBrightness(v) }
+@discardableResult
+func restoreBrightness(_ v: Float) -> Bool {
+    let a = setBrightness(v); usleep(300_000); let b = setBrightness(v)
+    return a || b          // 两次里有一次成功即算成功（第二次是压制环境光自动亮度的重试）
+}
+
+// MARK: - 电池状态与通知
+// pmset -g batt 免任何授权。只有「电池供电且正在放电」才算有耗尽风险：
+// 插着电时哪怕电量低也不会耗尽，此时阻止用户关屏毫无意义。
+struct Battery { var onBattery = false, discharging = false, percent = 100 }
+
+func batteryStatus() -> Battery {
+    var b = Battery()
+    // 测试钩子：BS_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"
+    // 例: BS_SIMULATE_BATTERY="15,batt,discharging" blankscreen off
+    // 仅供验证电量保护路径（插电的机器无法真实触发），正式使用不需要也不读取它。
+    if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_BATTERY"] {
+        let parts = sim.lowercased().split(separator: ",").map(String.init)
+        if let p = parts.first, let v = Int(p), (0...100).contains(v) {
+            b.percent = v
+            b.onBattery = parts.contains("batt")
+            b.discharging = parts.contains("discharging")
+            return b
+        }
+    }
+    guard let out = runCapture("/usr/bin/pmset", ["-g", "batt"]), !out.isEmpty else { return b }
+    b.onBattery = out.contains("Battery Power")
+    b.discharging = out.range(of: "discharging", options: .caseInsensitive) != nil
+    for tok in out.split(whereSeparator: { " \t\n;".contains($0) }) {
+        if tok.hasSuffix("%"), let v = Int(tok.dropLast()) { b.percent = v; break }
+    }
+    return b
+}
+
+func notify(_ msg: String) {
+    let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""])
+}
 
 // 常用键位名（仅用于展示）
 let keyTable: [(String, Int64)] = [
@@ -201,6 +265,30 @@ var cliSignalTerm = false
 // MARK: - 形态一：一次性 daemon
 func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     let cfg = loadConfig()
+    // DisplayServices 不可用时，黑屏根本不会发生——必须明确报错，不能让命令「成功」但屏幕还亮着
+    guard dsAvailable else {
+        let m = "无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）"
+        try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
+        FileHandle.standardError.write("""
+        错误：\(m)
+        本工具依赖该框架把亮度置 0 实现关屏。请在
+        https://github.com/Mihooni/blankscreen/issues 反馈你的系统版本。
+        """.data(using: .utf8)!)
+        exit(1)
+    }
+    // 电量下限：电池供电时拒绝进入黑屏。黑屏 + 阻止睡眠的组合最容易让人忘记，
+    // 一旦耗尽电池，未保存的工作会随之丢失。
+    if cfg.batteryFloor > 0 {
+        let b = batteryStatus()
+        if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
+            let m = "电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）"
+            try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
+            FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
+            log(m); notify(m)
+            exit(1)
+        }
+    }
+    try? fm.removeItem(atPath: rejectFile)
     // 只读一次亮度：重复调用既浪费，又可能因并发自动亮度调整得到不一致的值
     let current = max(readBrightness(), 0.0)
     let saved = current > 0.001 ? current : 0.5          // 已是 0（如上次遗留）时给个可用兜底
@@ -249,6 +337,18 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     if let t = timeout {
         Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in log("超时自动恢复"); cleanup() }
     }
+    // 黑屏期间持续监控电量：跌破下限就自动恢复，别等电池耗尽才被发现
+    if cfg.batteryFloor > 0 {
+        let bt = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            guard !restored else { return }
+            let b = batteryStatus()
+            guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
+            let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
+            log(m); notify(m)
+            cleanup()
+        }
+        RunLoop.main.add(bt, forMode: .common)
+    }
     runAppLoop()
 }
 
@@ -278,12 +378,14 @@ func runService(keyCode: Int64) -> Never {
     var caff: Process?
     var pinTimer: Timer?
     var timeoutTimer: Timer?     // 兜底：热键失效/被占用时也能自动恢复
+    var battTimer: Timer?        // 黑屏期间的电量守卫
 
     func restore() {
         guard blacked else { return }
         blacked = false
         pinTimer?.invalidate(); pinTimer = nil
         timeoutTimer?.invalidate(); timeoutTimer = nil
+        battTimer?.invalidate(); battTimer = nil
         let target = cfg.restoreFixed ?? saved
         log("service 恢复显示 \(target)")
         restoreBrightness(target)
@@ -291,12 +393,33 @@ func runService(keyCode: Int64) -> Never {
         try? fm.removeItem(atPath: stateFile)
     }
 
-    func blackout() {
-        guard !blacked else { return }
+    /// 记录拒绝原因并告知用户；CLI 通过 rejectFile 读回，避免「已发送指令」的误导性成功
+    func reject(_ m: String) -> Bool {
+        log(m); notify(m)
+        try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
+        return false
+    }
+    /// 返回 false = 没能进入黑屏（亮度接口不可用或电量过低）。调用方必须据此提示用户，
+    /// 否则会出现「命令看起来成功、屏幕其实还亮着」的静默失败。
+    @discardableResult
+    func blackout() -> Bool {
+        guard !blacked else { return true }
+        guard dsAvailable else {
+            return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
+        }
+        // 电量下限：关屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
+        if cfg.batteryFloor > 0 {
+            let b = batteryStatus()
+            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
+                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）")
+            }
+        }
+        try? fm.removeItem(atPath: rejectFile)
         let cur = max(readBrightness(), 0)
         saved = cur > 0.001 ? cur : saved
         try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
         blacked = true
+        if !setBrightness(0.0) { log("警告：首次设置亮度 0 失败") }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
@@ -319,7 +442,22 @@ func runService(keyCode: Int64) -> Never {
             RunLoop.main.add(tt, forMode: .common)
             timeoutTimer = tt
         }
-        log("service 进入黑屏，原亮度 \(saved)，兜底 \(Int(cfg.timeout))s")
+        // 电量守卫：黑屏期间每 30s 复查，跌破下限立即恢复
+        battTimer?.invalidate(); battTimer = nil
+        if cfg.batteryFloor > 0 {
+            let bt = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+                guard blacked else { return }
+                let b = batteryStatus()
+                guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
+                let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
+                log(m); notify(m)
+                restore()
+            }
+            RunLoop.main.add(bt, forMode: .common)
+            battTimer = bt
+        }
+        log("service 进入黑屏，原亮度 \(saved)，兜底 \(Int(cfg.timeout))s，电量下限 \(cfg.batteryFloor)%")
+        return true
     }
 
     func shutdown() {
@@ -330,7 +468,7 @@ func runService(keyCode: Int64) -> Never {
 
     installHotkey(keyCode: keyCode, modFlags: cfg.modFlags) {
         log("热键触发")
-        blacked ? restore() : blackout()
+        if blacked { restore() } else { _ = blackout() }
     }
 
     // 信号：CLI 用 SIGUSR1(关)/SIGUSR2(开)/SIGTERM(退出)，经命令文件 + 标志双通道。
@@ -392,6 +530,14 @@ func runProbe(_ label: String) -> Bool {
     do { try r.run() } catch { return false }
     r.waitUntilExit()
     return r.terminationStatus == 0
+}
+
+/// 常驻进程/daemon 拒绝关屏时留下的原因（读完即清，避免陈旧原因误导下一次调用）
+func rejectReason() -> String? {
+    guard let s = try? String(contentsOfFile: rejectFile, encoding: .utf8) else { return nil }
+    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    try? fm.removeItem(atPath: rejectFile)
+    return t.isEmpty ? nil : t
 }
 
 switch cmd {
@@ -501,6 +647,14 @@ case "config":
             let v = args[i + 1].lowercased()
             c.restoreFixed = (v == "original" || v == "auto") ? nil : (Float(v) ?? 0.5); i += 2
         }
+        else if args[i] == "--battery", i + 1 < args.count {
+            if let v = Int(args[i + 1]), (0...100).contains(v) {
+                c.batteryFloor = v
+            } else {
+                print("错误：--battery 需要 0-100 的整数（0 = 不限制），收到: \(args[i + 1])"); exit(1)
+            }
+            i += 2
+        }
         else if args[i] == "--reset" { c = Config(); i += 1 }
         else { i += 1 }
     }
@@ -520,14 +674,20 @@ case "config":
     print("  热键: \(m)\(keyName(c.keyCode))   (keyCode \(c.keyCode), mods \(c.modFlags))")
     print("  一次性模式超时: \(Int(c.timeout)) 秒（\(String(format: "%.1f", c.timeout / 3600)) 小时，0 = 不限）")
     print("  恢复亮度: \(c.restoreFixed.map { String(format: "固定 %.0f%%", $0 * 100) } ?? "进入黑屏前的亮度")")
-    print("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --restore original")
+    print("  电量下限: \(c.batteryFloor > 0 ? "\(c.batteryFloor)%（电池供电且放电时，低于此值拒绝关屏并自动恢复）" : "不限制")")
+    print("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original")
 
 case "off":
     if let pid = servicePid() {                      // 常驻模式：命令文件 + 信号双通道
+        try? fm.removeItem(atPath: rejectFile)        // 先清掉上一次的拒绝记录
         try? "off".write(toFile: commandFile, atomically: true, encoding: .utf8)
         kill(pid, SIGUSR1)                            // 菜单栏 App 会忽略信号、只认命令文件
-        // 轮询等待状态落地（固定 usleep 在慢机器上会误判失败）
-        let ok = waitUntil(timeout: 3.0) { fm.fileExists(atPath: stateFile) }
+        // 轮询等待：要么进入黑屏（stateFile），要么被拒绝（rejectFile）
+        let ok = waitUntil(timeout: 3.0) { fm.fileExists(atPath: stateFile) || fm.fileExists(atPath: rejectFile) }
+        if let reason = rejectReason() {
+            FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
+            exit(1)
+        }
         print(ok
               ? "已进入黑屏（常驻服务 pid=\(pid)）恢复: 热键或 blankscreen on"
               : "已发送进入黑屏指令（3s 内未确认，请查看 \(logPath)）")
@@ -546,6 +706,9 @@ case "off":
     if let r = daemonRunning() {
         print("已进入黑屏模式 pid=\(r.pid) 原亮度=\(r.brightness)")
         print("恢复方式: 热键 ⌃⌥⌘B  /  blankscreen on  /  远程执行同一命令")
+    } else if let reason = rejectReason() {
+        FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
+        exit(1)
     } else {
         print("启动失败，请查看 \(logPath)")
         exit(1)
@@ -565,6 +728,12 @@ case "on":
     print("已恢复显示，亮度 \(r.brightness)，当前实际亮度 \(readBrightness())")
 
 case "status":
+    let cfg = loadConfig()
+    let b = batteryStatus()
+    let battText = b.onBattery
+        ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")"
+        : "已接电源"
+    if !dsAvailable { print("⚠️  亮度接口不可用（DisplayServices 缺失），关屏功能将无法工作") }
     if let pid = servicePid() {
         print("常驻服务运行中 pid=\(pid)，\(fm.fileExists(atPath: stateFile) ? "黑屏中" : "正常显示")，当前亮度 \(readBrightness())")
     } else if let r = daemonRunning() {
@@ -572,10 +741,20 @@ case "status":
     } else {
         print("正常模式（无常驻服务），当前亮度 \(readBrightness())")
     }
+    print("电源: \(battText)，电量下限 \(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : "不限")")
 
 case "bright":
-    if args.count > 2, let v = Float(args[2]) { setBrightness(v); print("亮度 -> \(v)") }
-    else { print("当前亮度 \(readBrightness())") }
+    if args.count > 2, let v = Float(args[2]) {
+        if setBrightness(v) { print("亮度 -> \(v)") }
+        else {
+            FileHandle.standardError.write("设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n".data(using: .utf8)!)
+            exit(1)
+        }
+    } else {
+        let v = readBrightness()
+        if v < 0 { print("读取亮度失败：亮度接口不可用"); exit(1) }
+        print("当前亮度 \(v)")
+    }
 
 default:
     print("""
@@ -587,8 +766,8 @@ default:
       blankscreen service install            安装常驻服务（开机自启，热键直接开关）
       blankscreen service uninstall          卸载常驻服务
       blankscreen off / on                   进入 / 退出黑屏
-      blankscreen status                     查看状态
-      blankscreen config --key 11            查看/修改热键与超时
+      blankscreen status                     查看状态（含电源与电量）
+      blankscreen config --key 11            查看/修改热键、超时、电量下限
       blankscreen bright [0.0-1.0]           直接读写亮度
 
       不用常驻服务时: blankscreen off [--timeout 秒] [--no-timeout]
@@ -596,5 +775,6 @@ default:
     默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
     热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。
     未注册热键时仍可用: blankscreen on（含远程 SSH）/ 一次性模式 12 小时超时兜底
+    电量保护: 默认低于 20% 且使用电池时拒绝关屏，黑屏中跌破则自动恢复（config --battery 0 关闭）
     """)
 }

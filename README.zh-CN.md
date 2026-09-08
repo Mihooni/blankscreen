@@ -27,6 +27,7 @@ $ blankscreen on      # 恢复显示（SSH 远程执行同样有效）
 - **菜单栏 App**（`BlankScreenBar.app`）：点击图标开关显示器；设置面板支持自定义热键、兜底超时、恢复亮度策略、开机自启；内置热键自检；日志查看。
 - **CLI**（`blankscreen`）：`off` / `on` / `status` / `bright` / `config`，可在 SSH 里直接用；CLI 与菜单栏 App 状态互通，谁都能开关。
 - **崩溃安全**：黑屏期间进程被意外杀死，下次启动会自动恢复原亮度；还有可配置的兜底超时（默认 12 小时）作为最后的安全网。
+- **电量保护**：仅使用电池（且在放电）时，电量低于下限（默认 20%）会拒绝关屏；黑屏期间跌破下限则自动恢复显示并通知——忘了恢复的黑屏不会再耗尽电池。插着电源时不干预。
 - **单实例**：重复启动会干净地接管，并清理遗留的 `caffeinate` 孤儿进程。
 
 ## 环境要求
@@ -68,12 +69,22 @@ cp -R BlankScreenBar.app /Applications/
 > 此时对 `.pkg` 右键 → **打开**，再确认即可。App 首次启动同理——不过安装器已自动清除了
 > App 的隔离标记，装完直接就能正常打开。
 
+### 验证下载（可选）
+
+每个 Release 都附带 `SHA256SUMS` 校验和文件与 GitHub 构建来源证明（SLSA attestation），
+无需任何 Apple 账号即可确认产物确实出自本仓库的构建流程：
+
+```bash
+shasum -a 256 -c SHA256SUMS                                          # 校验文件完整性
+gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # 验证构建来源
+```
+
 ## 使用
 
 **菜单栏**：点击 ☀ / 🌙 图标
 
 - 关闭显示器 / 恢复显示
-- 设置… —— 热键组合与按键、兜底超时、恢复亮度策略、登录时自动启动
+- 设置… —— 热键组合与按键、兜底超时、电量保护、恢复亮度策略、登录时自动启动
 - 热键自检 —— 自动合成一次热键验证整条链路（无副作用，不会开关屏幕）
 - 打开日志
 
@@ -83,10 +94,11 @@ cp -R BlankScreenBar.app /Applications/
 blankscreen off                    # 立即黑屏（一次性 daemon，超时自动恢复）
 blankscreen off --timeout 3600     # 自定义兜底超时
 blankscreen on                     # 恢复显示
-blankscreen status                 # 查看状态
+blankscreen status                 # 查看状态（含电源与电量）
 blankscreen bright 0.5             # 直接读写系统亮度
 blankscreen service install        # 以 launchd 服务常驻（不用菜单栏 App 时）
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
+blankscreen config --battery 20    # 电量下限 %：低于则拒绝/退出黑屏（0 = 不限制）
 ```
 
 默认热键 **⌃⌥⌘B**。可在设置面板或 `blankscreen config` 修改。组合必须带至少一个修饰键（⌘/⌃/⌥/⇧）——macOS 不允许无修饰键的全局热键。
@@ -107,6 +119,8 @@ blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
 **为什么不用 `pmset displaysleepnow`？** 真·显示器睡眠会拆掉帧缓冲，远程端什么都看不到；而且很多 App（浏览器、Electron 应用）持有 `NoDisplaySleepAssertion`，根本进不了显示器睡眠。亮度归零在任何情况下都有效，且是唯一保持远程画面可用的方法。
 
 **省多少电？** 背光关闭约省 1–2 W（轻载整机约 15–30%）。GPU / 合成器仍在工作，这是「远程可控」的必要代价。
+
+**电量保护是怎么工作的？** 仅在「使用电池且正在放电」时生效：电量低于下限（默认 20%）会拒绝进入黑屏；黑屏期间每 30 秒复查一次，跌破下限立即恢复显示并发系统通知。插着电源时完全不干预。可在设置面板或 `blankscreen config --battery 0` 关闭。
 
 ## 开发
 

@@ -27,6 +27,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 - **Menu bar app** (`BlankScreenBar.app`): click the status icon for on/off, a full settings panel (hotkey, fallback timeout, restore brightness, launch-at-login), built-in hotkey self-test, and log viewer.
 - **CLI** (`blankscreen`): `off` / `on` / `status` / `bright` / `config` — works over SSH, and either mode can toggle the other.
 - **Crash-safe**: if the app is ever killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) restores the display even if the hotkey dies.
+- **Battery guard**: on battery power (and discharging), blanking below a configurable floor (default 20%) is refused, and if the battery drops below the floor mid-blackout the display is restored automatically — a forgotten black screen can no longer drain your Mac. No effect on AC power.
 - **Single instance**: launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
 
 ## Requirements
@@ -71,6 +72,17 @@ cp -R BlankScreenBar.app /Applications/
 > installer already clears its quarantine flag, so the app should open normally
 > right after installing.
 
+### Verify a download (optional)
+
+Each release ships a `SHA256SUMS` checksum file plus GitHub build-provenance
+attestations (SLSA), so you can confirm the artifacts came from this repo's
+workflow — no Apple account needed:
+
+```bash
+shasum -a 256 -c SHA256SUMS                                          # bytes match what was published
+gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by this repo's release workflow
+```
+
 ## Usage
 
 **Menu bar app** — click ☀ / 🌙 in the menu bar:
@@ -90,6 +102,8 @@ blankscreen status
 blankscreen bright 0.5   # read/write system brightness directly
 blankscreen service install    # run the CLI as a launchd service (menu app not required)
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
+blankscreen config --battery 20      # battery floor %: refuse/exit blackout below it (0 = off)
+blankscreen status                   # now also shows power source and battery %
 ```
 
 Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscreen config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
@@ -110,6 +124,8 @@ Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscr
 **Why not just `pmset displaysleepnow`?** True display sleep tears down the framebuffer — remote viewers get nothing. Many apps (browsers, Electron apps) also hold `NoDisplaySleepAssertion`, which blocks display sleep entirely. Brightness-zeroing works everywhere and is the only method that keeps remote frames flowing.
 
 **Power savings?** Backlight off saves roughly 1–2 W (up to ~15–30% of a lightly loaded machine). The GPU/compositor keep running by design.
+
+**How does the battery guard work?** It only acts when the Mac is on battery and discharging: below the floor (default 20%), starting a blackout is refused; during a blackout the battery is re-checked every 30 s and the display is restored automatically with a notification once the floor is crossed. On AC power it never interferes. Set `blankscreen config --battery 0` (or the settings panel) to disable.
 
 ## Development
 

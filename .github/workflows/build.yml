@@ -52,6 +52,8 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: write
+      id-token: write          # GitHub artifact attestation 必需
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - run: make all
@@ -64,9 +66,19 @@ jobs:
           cp -R build/BlankScreenBar.app dist/
           ditto -c -k --keepParent dist blankscreen-macos.zip
           cp build/pkgout/BlankScreen-*.pkg .
+          # 生成校验和：用户下载后可 `shasum -a 256 -c SHA256SUMS` 验证完整性
+          shasum -a 256 blankscreen-macos.zip BlankScreen-*.pkg > SHA256SUMS
+          cat SHA256SUMS
+      # 构建来源证明（SLSA）：证明产物由本仓库的 workflow 构建，未经篡改
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            blankscreen-macos.zip
+            BlankScreen-*.pkg
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             blankscreen-macos.zip
             BlankScreen-*.pkg
+            SHA256SUMS
           generate_release_notes: true
