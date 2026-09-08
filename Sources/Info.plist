@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>          <string>BlankScreenBar</string>
+    <key>CFBundleIdentifier</key>          <string>com.blankscreen.bar</string>
+    <key>CFBundleName</key>                <string>BlankScreenBar</string>
+    <key>CFBundleDisplayName</key>         <string>BlankScreen</string>
+    <key>CFBundlePackageType</key>         <string>APPL</string>
+    <key>CFBundleShortVersionString</key>  <string>1.1.0</string>
+    <key>CFBundleVersion</key>             <string>2</string>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
+    <key>CFBundleDevelopmentRegion</key>   <string>en</string>
+    <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+    <key>LSApplicationCategoryType</key>   <string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key>      <string>13.0</string>
+    <key>LSUIElement</key>                 <true/>
+    <key>NSHighResolutionCapable</key>     <true/>
+    <key>NSSupportsAutomaticTermination</key> <false/>
+    <key>NSAppleEventsUsageDescription</key>
+        <string>Used to synthesize one hotkey event during self-test, verifying that the system really delivers the keystroke to this app.</string>
+</dict>
+</plist>

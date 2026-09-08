@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binaries (arm64 + x86_64)
+        run: make all
+
+      - name: Smoke test CLI
+        run: |
+          ./build/blankscreen status
+          ./build/blankscreen help 2>/dev/null || ./build/blankscreen
+
+      - name: Verify architectures
+        run: |
+          lipo -info build/blankscreen
+          lipo -info build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/blankscreen dist/
+          cp -R build/BlankScreenBar.app dist/
+          ditto -c -k --keepParent dist blankscreen-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blankscreen-macos
+          path: blankscreen-macos.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: make all
+      - name: Package release
+        run: |
+          mkdir -p dist
+          cp build/blankscreen dist/
+          cp -R build/BlankScreenBar.app dist/
+          ditto -c -k --keepParent dist blankscreen-macos.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: blankscreen-macos.zip
+          generate_release_notes: true

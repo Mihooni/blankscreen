@@ -1,0 +1,23 @@
+# Xcode / Swift
+build/
+DerivedData/
+*.xcodeproj
+xcuserdata/
+
+# 编译产物
+*.bin
+*.o
+blankscreen
+BlankScreenBar
+mkicon
+bright
+dsleep
+capture
+sendhotkey
+hk_any
+blctl
+
+# 系统文件
+.DS_Store
+*.swp
+*~
