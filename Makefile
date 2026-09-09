@@ -24,7 +24,7 @@ endif
 APPSRC  = build/BlankScreenBar.app
 DEST    = /Applications/BlankScreenBar.app
 
-.PHONY: all cli app pkg install install-cli uninstall dev-tools clean
+.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools clean
 
 all: cli app
 
@@ -32,6 +32,10 @@ all: cli app
 # 可指定版本: make pkg VERSION=v1.1.1
 pkg: all
 	@./packaging/make_pkg.sh $(VERSION)
+
+# 产出拖拽安装镜像 .dmg（App + Applications 快捷方式 + CLI 一键安装脚本）
+dmg: all
+	@./packaging/make_dmg.sh $(VERSION)
 
 # 通用规则：单文件 Swift 程序按架构分别编译后 lipo 合并
 define compile-universal

@@ -47,6 +47,11 @@ $ blankscreen on      # 恢复显示（SSH 远程执行同样有效）
 
 安装器会自动清除 Gatekeeper 隔离标记并启动 App，无需任何手工操作。
 
+**方式 A2 —— DMG 拖拽安装**：从 [Releases](../../releases) 下载
+`BlankScreen-<版本号>.dmg`，打开后把 App 拖进 Applications 文件夹；
+双击镜像里的「安装命令行工具.command」可顺手装好 CLI（弹系统密码框）。
+若 App 首次打开被 Gatekeeper 拦下，右键 → **打开** 即可。
+
 **方式 B —— 源码构建**（需 Xcode Command Line Tools）：
 
 ```bash

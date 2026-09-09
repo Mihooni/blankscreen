@@ -48,6 +48,12 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 The installer also clears the Gatekeeper quarantine flag and launches the app for you,
 so there is nothing to do by hand.
 
+**Option A2 — DMG drag-and-drop.** Download `BlankScreen-<version>.dmg` from
+[Releases](../../releases), open it, and drag the app into Applications.
+Double-click `安装命令行工具.command` inside the image to also install the CLI
+(one GUI password prompt). If Gatekeeper blocks the first launch, right-click
+the app → **Open**.
+
 **Option B — build from source** (needs Xcode Command Line Tools):
 
 ```bash
