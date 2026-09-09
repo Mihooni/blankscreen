@@ -6,12 +6,13 @@
 # 只能求助于 pmset disablesleep 这个全局开关，而它需要 root。
 #
 # 安全约束（任意一条被破坏都必须视为漏洞）：
-#   1. 本文件必须是 root:wheel 且权限 0755，目录 /Library/PrivilegedHelperTools
+#   1. 本文件必须是 root:wheel 且权限 0755；目录 /Library/PrivilegedHelperTools
 #      同样为 root:wheel —— 普通用户无法改写脚本内容。
 #   2. sudoers 中精确列出「单用户 + (root) + 每个参数各一条」，不接受通配。
 #   3. 只接受 on / off / status / detect 四个字面量，其他一律 exit 2。
-#      任何外部输入都不参与 shell 求值，避免参数注入。
-#   4. 绝不接受路径或数值参数，杜绝 `pmset` 被借去改别的设置。
+#   4. 绝不接受路径或数值参数，杜绝 pmset 被借去改其他设置。
+#   5. 引入持有者记账（见下方 OWNDIR）：关屏联动与手动防睡眠可能同时依赖这个
+#      唯一的全局开关，任一方停止时只注销自己，绝不关掉别人正依赖的防睡眠。
 
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -19,6 +20,51 @@ export PATH
 
 PMS=/usr/bin/pmset
 LOG_TAG=com.blankscreen.pmset
+
+# 持有者目录（root:wheel，普通用户不可写）。
+#
+# 为什么需要它：disablesleep 是**一个**全局开关，但可能有多个持有者同时依赖它
+# —— 例如「关屏联动防睡眠」和「手动 nosleep 守护」各自独立启停。没有持有者记账时，
+# 任何一方关闭都会顺手把另一方的防睡眠也关掉（互相踩踏）。
+#
+# 记账放在 root 拥有的目录里，普通用户无法伪造持有者来阻止复位。
+OWNDIR=/var/db/blankscreen-nosleep
+
+# 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
+# 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
+caller_pid() {
+    p=$$
+    i=0
+    while [ $i -lt 6 ]; do
+        p=$(/bin/ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || return 0
+        [ -n "$p" ] || return 0
+        case "$(/bin/ps -o comm= -p "$p" 2>/dev/null)" in
+            *sudo*) i=$((i+1)); continue ;;
+            *) echo "$p"; return 0 ;;
+        esac
+    done
+}
+
+# 清理已失效的持有者：进程已退出，或 pid 已被系统复用给别的程序。
+# 不清会让崩溃残留的持有者把系统永久留在「永不睡眠」状态——这是同类工具最常见的翻车方式。
+prune_owners() {
+    [ -d "$OWNDIR" ] || return 0
+    for f in "$OWNDIR"/*; do
+        [ -e "$f" ] || continue
+        opid=${f##*/}
+        case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
+        case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
+            *blankscreen*|*BlankScreenBar*) ;;
+            *) rm -f "$f" ;;
+        esac
+    done
+    return 0
+}
+
+owner_count() {
+    n=$(/bin/ls -A "$OWNDIR" 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+    echo "${n:-0}"
+}
 
 usage() {
     echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
@@ -30,15 +76,25 @@ usage() {
 case "$1" in
     on)
         # disablesleep 未文档化：在部分系统上可能已被移除。
-        # 失败必须让调用方看得见（非 0 退出码），不能静默。
+        # 失败必须让调用方看得见（非 0 退出码），不能静默降级。
         if ! "$PMS" disablesleep 1 2>/dev/null; then
             echo "$LOG_TAG: 'pmset disablesleep 1' 失败（该选项可能已被移除）" >&2
             exit 1
         fi
+        prune_owners
+        /bin/mkdir -p "$OWNDIR" 2>/dev/null && /bin/chmod 700 "$OWNDIR"
+        c=$(caller_pid)
+        if [ -n "$c" ]; then : > "$OWNDIR/$c" 2>/dev/null; fi
         echo "on"
         ;;
     off)
-        "$PMS" disablesleep 0 >/dev/null 2>&1
+        # 只注销自己。还有其他持有者在用时绝不能复位——那会把别人正依赖的防睡眠关掉。
+        prune_owners
+        c=$(caller_pid)
+        if [ -n "$c" ]; then rm -f "$OWNDIR/$c" 2>/dev/null; fi
+        if [ "$(owner_count)" = "0" ]; then
+            "$PMS" disablesleep 0 >/dev/null 2>&1
+        fi
         echo "off"
         ;;
     status)
@@ -46,13 +102,20 @@ case "$1" in
         echo "${v:-0}"
         ;;
     detect)
-        # 探测 disablesleep 是否仍受支持：写 0 并看能否成功、读回是否一致。
-        # 这是「未文档化 API 随时可能消失」的显式降级检查。
-        if "$PMS" disablesleep 0 >/dev/null 2>&1; then
-            v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
-            echo "supported:${v:-0}"
+        # 只读探测：报告当前值 + 本进程是否有写入权限。
+        #
+        # 不能用「写一次看退出码」来判定支持性 —— 实测在非 root 下
+        # `pmset disablesleep 0` 退出码为 0 却并未生效（读回值不变），
+        # 照退出码判定会得出「支持」的错误结论。
+        # 同理，这里绝不能真的写入：本机若被其他工具设了 disablesleep=1，
+        # 探测顺手改成 0 会破坏别人的状态（写入应由显式开启去做）。
+        v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+        prune_owners
+        n=$(owner_count)
+        if [ "$(/usr/bin/id -u)" = "0" ]; then
+            echo "root:current=${v:-0} owners=$n"
         else
-            echo "unsupported"
+            echo "user:current=${v:-0} owners=$n"
         fi
         ;;
     *)

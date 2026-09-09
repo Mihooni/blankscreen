@@ -100,7 +100,10 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # 验证构
 blankscreen off                    # 立即黑屏（一次性 daemon，超时自动恢复）
 blankscreen off --timeout 3600     # 自定义兜底超时
 blankscreen on                     # 恢复显示
+blankscreen toggle                 # 一条命令切换（可绑定到快捷键工具 / 远程脚本）
 blankscreen status                 # 查看状态（含电源与电量）
+blankscreen doctor                 # 综合自检：关屏能力、显示器可控性、进程、残留
+blankscreen version                # 查看版本（反馈问题时一并附上）
 blankscreen bright 0.5             # 直接读写系统亮度
 blankscreen service install        # 以 launchd 服务常驻（不用菜单栏 App 时）
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
@@ -109,6 +112,8 @@ blankscreen config --auto-nosleep  # 关屏时自动联动防睡眠，恢复显�
 ```
 
 默认热键 **⌃⌥⌘B**。可在设置面板或 `blankscreen config` 修改。组合必须带至少一个修饰键（⌘/⌃/⌥/⇧）——macOS 不允许无修饰键的全局热键。
+
+**多显示器**：关屏会对所有在线显示器生效。但多数 HDMI / DVI / DP 外接屏不支持软件亮度控制，这类屏幕关不掉——`blankscreen doctor` 会明确列出哪块屏不可控，不会让你以为它坏了。
 
 ## 防睡眠（合盖 / 电池 / 无显示器时不睡眠）
 
@@ -139,6 +144,9 @@ sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
 - sudoers 仅授权单用户、以 root 身份、精确匹配四个参数
 - 卸载时先复位 `disablesleep 0` 再删助手，杜绝「系统永不睡眠」残留
 - 开机 LaunchDaemon + 每次启动的自愈检查双保险：任何异常退出都会自动复位
+- **持有者记账**：`disablesleep` 是唯一的全局开关，而「关屏联动」和「手动防睡眠」可能同时依赖它。
+  助手会记录每个持有者，任一方停止时只注销自己——不会顺手关掉别人正在用的防睡眠。
+  （记账目录为 `/var/db/blankscreen-nosleep`，root 拥有，普通用户无法伪造持有者）
 - 电量下限对防睡眠同样生效——合盖 + 电池 + 不睡眠是最容易耗尽电池的组合
 
 ## 卸载
@@ -164,19 +172,31 @@ sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
 
 ```bash
 make            # 构建 CLI + App 到 build/
+make test       # 端到端冒烟测试（参数校验 / 配置往返 / 防睡眠 / 资产一致性）
 make dev-tools  # 编译调试小工具到 build/dev-tools/
 make clean
 ```
 
-源码结构：`Sources/blankscreen.swift`（CLI）、`Sources/BlankScreenBar.swift`（菜单栏 App）、`dev-tools/`（开发期用的截帧 / 亮度 / 探测辅助工具）。
+源码结构（Swift 要求主文件名为 `main.swift`，因此按 target 分目录）：
+
+- `Sources/CLI/main.swift` —— 命令行工具
+- `Sources/Bar/main.swift` —— 菜单栏 App
+- `Sources/Shared/Version.swift` —— 构建时生成的版本常量
+- `dev-tools/` —— 开发期辅助工具，以及 `smoke.sh` 冒烟测试
+
+`make test` 会自动跳过当前环境跑不了的用例（例如菜单栏 App 正在常驻时不做真实关屏，避免打断会话）；设 `SMOKE_FULL=1` 可强制跑真实关屏 / 恢复。
 
 ## 已知限制
 
-- **外接显示器不会一起变暗。** 亮度只作用于主显示器（`CGMainDisplayID`）。接了外接屏时，
-  内置屏会变黑而外接屏仍正常显示。要覆盖所有屏幕需依赖 DDC/CI，而 Apple 芯片上这条路不可靠。
+- **部分外接显示器关不掉。** 亮度归零依赖软件亮度接口，多数 HDMI / DVI / DP 外接屏不支持它，
+  这类屏幕在关屏时不会熄灭（`blankscreen doctor` 会具体指出是哪一块）。
+  要让它们也熄灭只能走硬件睡眠，而那会中断远程画面——本工具刻意不这么做。
 
 - 屏幕**并非断电**——这是刻意设计。背光被设为 0，帧缓冲仍在渲染，因此屏幕共享 / 远程桌面
   仍能正常取帧。真正的显示器休眠会中断远程访问，详见[工作原理](#工作原理)。
+
+- **关屏不等于锁屏。** 关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。
+  离开座位前请手动锁屏（⌃⌘Q）。
 
 ## 许可
 

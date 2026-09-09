@@ -10,6 +10,10 @@
 CC      = swiftc
 TARGETS = arm64-apple-macosx13.0 x86_64-apple-macosx13.0
 
+# 版本号：CI 传 VERSION=v1.3.2；本地默认取最近的 git tag，便于开发时辨认构建来源
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 # 禁止 cp 生成 ._xxx AppleDouble 元数据文件：否则打安装包时会把垃圾文件
 # 一起塞进 payload（COPYFILE_DISABLE 对所有配方生效）
 export COPYFILE_DISABLE := 1
@@ -24,9 +28,17 @@ endif
 APPSRC  = build/BlankScreenBar.app
 DEST    = /Applications/BlankScreenBar.app
 
-.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools clean
+.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test clean
 
 all: cli app
+
+# 把版本写进二进制与 App 的 Info.plist（`blankscreen version` / 关于面板会显示）
+.PHONY: version-file
+version-file:
+	@printf '// 由 Makefile 生成，请勿手改\nlet BS_VERSION = "%s"\nlet BS_COMMIT = "%s"\n' \
+		"$(VERSION)" "$(COMMIT)" > Sources/Shared/Version.swift
+	@sed -i '' 's|<string>[0-9.]*</string><!--VERSION-->|<string>$(VERSION)</string><!--VERSION-->|' Sources/Info.plist 2>/dev/null || true
+	@echo "==> 版本: $(VERSION) ($(COMMIT))"
 
 # 产出可直接分发的 .pkg 安装器（内含 App + CLI，带许可协议）
 # 可指定版本: make pkg VERSION=v1.1.1
@@ -37,21 +49,28 @@ pkg: all
 dmg: all
 	@./packaging/make_dmg.sh $(VERSION)
 
+# 端到端冒烟测试：构建后跑真实关屏/恢复/防睡眠路径（会短暂黑屏约 4 秒）
+test: cli
+	@./dev-tools/smoke.sh
+
 # 通用规则：单文件 Swift 程序按架构分别编译后 lipo 合并
+# $(1)=源文件 $(2)=中间产物名 $(3)=输出路径
 define compile-universal
 	@mkdir -p build
-	$(foreach t,$(TARGETS),$(CC) -O -target $(t) $(1) -o build/$(notdir $(basename $(1)))_$(t);)
-	lipo -create $(foreach t,$(TARGETS),build/$(notdir $(basename $(1)))_$(t)) -output $(2)
+	$(foreach t,$(TARGETS),$(CC) -O -target $(t) $(1) -o build/$(2)_$(t);)
+	lipo -create $(foreach t,$(TARGETS),build/$(2)_$(t)) -output $(3)
 endef
 
-cli:
-	$(call compile-universal,Sources/blankscreen.swift,build/blankscreen)
+# 源码按 target 分目录：Swift 只有名为 main.swift 的文件允许顶层代码，
+# 因此 CLI 与菜单栏 App 各有自己的 main.swift，共享代码放 Sources/Shared/。
+cli: version-file
+	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift,blankscreen,build/blankscreen)
 
 app: build/BlankScreenBar.app
 
-build/BlankScreenBar.app: Sources/BlankScreenBar.swift Sources/Info.plist Sources/AppIcon.icns
+build/BlankScreenBar.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns version-file
 	@mkdir -p build/BlankScreenBar.app/Contents/MacOS build/BlankScreenBar.app/Contents/Resources
-	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/BlankScreenBar.swift -o build/bsb_$(t);)
+	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift -o build/bsb_$(t);)
 	lipo -create $(foreach t,$(TARGETS),build/bsb_$(t)) -output build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
 	cp Sources/Info.plist build/BlankScreenBar.app/Contents/Info.plist
 	cp Sources/AppIcon.icns build/BlankScreenBar.app/Contents/Resources/AppIcon.icns

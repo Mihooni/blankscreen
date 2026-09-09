@@ -155,6 +155,25 @@ var dsAvailable: Bool {
         && dlsym(h, "DisplayServicesSetBrightness") != nil
 }
 
+/// 所有在线显示器。
+/// 只操作 CGMainDisplayID() 会漏掉外接显示器——用户要的是「关屏」，那必须是所有屏。
+func onlineDisplays() -> [CGDirectDisplayID] {
+    var count: UInt32 = 0
+    guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [CGMainDisplayID()] }
+    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    CGGetOnlineDisplayList(count, &ids, &count)
+    return ids.prefix(Int(count)).isEmpty ? [CGMainDisplayID()] : Array(ids.prefix(Int(count)))
+}
+
+/// 上一次设置亮度时失败的显示器。多数 HDMI / DVI 外接屏不支持软件亮度，
+/// 这类屏幕关不掉，必须让用户看见，而不是让他以为一切正常。
+var lastFailedDisplays: [CGDirectDisplayID] = []
+
+func setOneBrightness(_ id: CGDirectDisplayID, _ v: Float) -> Bool {
+    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
+    return unsafeBitCast(p, to: DSSet.self)(id, v) == 0
+}
+
 func readBrightness() -> Float {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
     let f = unsafeBitCast(p, to: DSGet.self)
@@ -163,15 +182,28 @@ func readBrightness() -> Float {
 }
 // 返回 false = 设置失败（实测该 API 成功时返回 0）。调用方必须据此提示用户，
 // 否则用户会以为关屏成功、实际屏幕还亮着。
+// 遍历所有在线显示器：只关主屏会让外接屏继续亮着，等于没关。
 @discardableResult
 func setBrightness(_ v: Float) -> Bool {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
-    return unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v) == 0
+    var ok = false
+    var failed: [CGDirectDisplayID] = []
+    for id in onlineDisplays() {
+        if setOneBrightness(id, v) { ok = true } else { failed.append(id) }
+    }
+    lastFailedDisplays = failed
+    return ok
 }
+/// 恢复必须尽最大努力成功：失败意味着用户永远看不见屏幕。
+/// 因此多次重试（间隔递增），而不是「设一次就走」。
 @discardableResult
 func restoreBrightness(_ v: Float) -> Bool {
-    let a = setBrightness(v); usleep(300_000); let b = setBrightness(v)
-    return a || b          // 两次里有一次成功即算成功（第二次是压制环境光自动亮度的重试）
+    for i in 0..<6 {
+        var ok = false
+        for id in onlineDisplays() { if setOneBrightness(id, v) { ok = true } }
+        if ok { return true }
+        usleep(UInt32(150_000 * (i + 1)))
+    }
+    return false
 }
 
 // MARK: - 电池状态与通知
@@ -228,6 +260,13 @@ func helperInstalled() -> Bool {
     return true
 }
 
+/// 提权助手版本是否过旧：带「持有者记账」的版本 detect 输出会带 owners= 字段。
+/// 旧版没有记账 —— 关屏联动与手动防睡眠会互相踩掉对方的 disablesleep。
+func helperOutdated() -> Bool {
+    guard helperInstalled(), let d = helperExec("detect") else { return false }
+    return !d.contains("owners=")
+}
+
 /// 经 sudo -n 调用 helper。arg 走白名单，杜绝参数注入。
 /// 返回 nil = 不可用（未安装 / 授权失效 / pmset 已移除该选项），调用方必须据此降级并告知用户。
 func helperExec(_ arg: String) -> String? {
@@ -244,7 +283,10 @@ func systemSleepDisabled() -> Bool {
 
 /// 把脚本交给 root 执行（触发系统密码框）。脚本先落盘再执行，避免 shell 多层转义出错。
 func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
-    let f = "/tmp/com.blankscreen.install." + String(ProcessInfo.processInfo.processIdentifier) + ".sh"
+    // 落在自己的状态目录（仅当前用户可写），而不是 /tmp。
+    // /tmp 是全局可写目录：提权脚本放那里存在被其他进程抢先创建同名文件替换的窗口，
+    // 而 osascript 随后会以 root 执行它。用私有目录消除这条提权旁路。
+    let f = base + "/.install." + String(ProcessInfo.processInfo.processIdentifier) + ".sh"
     do {
         try scriptBody.write(toFile: f, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f)
@@ -310,6 +352,8 @@ let helperScript = #"""
 #   2. sudoers 中精确列出「单用户 + (root) + 每个参数各一条」，不接受通配。
 #   3. 只接受 on / off / status / detect 四个字面量，其他一律 exit 2。
 #   4. 绝不接受路径或数值参数，杜绝 pmset 被借去改其他设置。
+#   5. 引入持有者记账（见下方 OWNDIR）：关屏联动与手动防睡眠可能同时依赖这个
+#      唯一的全局开关，任一方停止时只注销自己，绝不关掉别人正依赖的防睡眠。
 
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -317,6 +361,51 @@ export PATH
 
 PMS=/usr/bin/pmset
 LOG_TAG=com.blankscreen.pmset
+
+# 持有者目录（root:wheel，普通用户不可写）。
+#
+# 为什么需要它：disablesleep 是**一个**全局开关，但可能有多个持有者同时依赖它
+# —— 例如「关屏联动防睡眠」和「手动 nosleep 守护」各自独立启停。没有持有者记账时，
+# 任何一方关闭都会顺手把另一方的防睡眠也关掉（互相踩踏）。
+#
+# 记账放在 root 拥有的目录里，普通用户无法伪造持有者来阻止复位。
+OWNDIR=/var/db/blankscreen-nosleep
+
+# 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
+# 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
+caller_pid() {
+    p=$$
+    i=0
+    while [ $i -lt 6 ]; do
+        p=$(/bin/ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || return 0
+        [ -n "$p" ] || return 0
+        case "$(/bin/ps -o comm= -p "$p" 2>/dev/null)" in
+            *sudo*) i=$((i+1)); continue ;;
+            *) echo "$p"; return 0 ;;
+        esac
+    done
+}
+
+# 清理已失效的持有者：进程已退出，或 pid 已被系统复用给别的程序。
+# 不清会让崩溃残留的持有者把系统永久留在「永不睡眠」状态——这是同类工具最常见的翻车方式。
+prune_owners() {
+    [ -d "$OWNDIR" ] || return 0
+    for f in "$OWNDIR"/*; do
+        [ -e "$f" ] || continue
+        opid=${f##*/}
+        case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
+        case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
+            *blankscreen*|*BlankScreenBar*) ;;
+            *) rm -f "$f" ;;
+        esac
+    done
+    return 0
+}
+
+owner_count() {
+    n=$(/bin/ls -A "$OWNDIR" 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+    echo "${n:-0}"
+}
 
 usage() {
     echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
@@ -333,10 +422,20 @@ case "$1" in
             echo "$LOG_TAG: 'pmset disablesleep 1' 失败（该选项可能已被移除）" >&2
             exit 1
         fi
+        prune_owners
+        /bin/mkdir -p "$OWNDIR" 2>/dev/null && /bin/chmod 700 "$OWNDIR"
+        c=$(caller_pid)
+        if [ -n "$c" ]; then : > "$OWNDIR/$c" 2>/dev/null; fi
         echo "on"
         ;;
     off)
-        "$PMS" disablesleep 0 >/dev/null 2>&1
+        # 只注销自己。还有其他持有者在用时绝不能复位——那会把别人正依赖的防睡眠关掉。
+        prune_owners
+        c=$(caller_pid)
+        if [ -n "$c" ]; then rm -f "$OWNDIR/$c" 2>/dev/null; fi
+        if [ "$(owner_count)" = "0" ]; then
+            "$PMS" disablesleep 0 >/dev/null 2>&1
+        fi
         echo "off"
         ;;
     status)
@@ -352,10 +451,12 @@ case "$1" in
         # 同理，这里绝不能真的写入：本机若被其他工具设了 disablesleep=1，
         # 探测顺手改成 0 会破坏别人的状态（写入应由显式开启去做）。
         v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+        prune_owners
+        n=$(owner_count)
         if [ "$(/usr/bin/id -u)" = "0" ]; then
-            echo "root:current=${v:-0}"
+            echo "root:current=${v:-0} owners=$n"
         else
-            echo "user:current=${v:-0}"
+            echo "user:current=${v:-0} owners=$n"
         fi
         ;;
     *)
@@ -457,6 +558,7 @@ func uninstallHelperScript() -> String {
     #!/bin/sh
     /usr/bin/pmset disablesleep 0 2>/dev/null || true
     /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
+    /bin/rm -rf /var/db/blankscreen-nosleep
     /bin/rm -f \(resetDaemon)
     /bin/rm -f \(sudoersPath)
     /bin/rm -f \(helperPath)
@@ -706,8 +808,21 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
             log("nosleep: 已复位 disablesleep=0")
         }
         log("恢复亮度 \(restoreTarget)，结束 caffeinate")
-        restoreBrightness(restoreTarget)
         caff.terminate()
+        // 恢复失败绝不能就此退出：那样屏幕会永久黑着，而用户没有任何自救手段
+        // （热键已随进程消亡）。失败就留在原地持续重试，直到亮度真的回来。
+        if !restoreBrightness(restoreTarget) {
+            log("错误：亮度恢复失败，转入持续重试（屏幕必须亮回来）")
+            notify("亮度恢复失败，正在持续重试")
+            let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                if restoreBrightness(restoreTarget) {
+                    log("重试成功，亮度已恢复 \(restoreTarget)")
+                    exit(0)
+                }
+            }
+            RunLoop.main.add(rt, forMode: .common)
+            return
+        }
         try? fm.removeItem(atPath: pidFile)
         try? fm.removeItem(atPath: stateFile)
         exit(0)
@@ -743,7 +858,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
 
 // MARK: - 形态二：常驻服务（热键 / 信号 切换开关）
 func runService(keyCode: Int64) -> Never {
-    let cfg = loadConfig()
+    var cfg = loadConfig()
     let myPid = ProcessInfo.processInfo.processIdentifier
     // 互斥：已有存活常驻服务（CLI daemon 或菜单栏 App）时拒绝启动，避免双服务抢状态
     if let other = servicePid(), other != myPid {
@@ -770,6 +885,8 @@ func runService(keyCode: Int64) -> Never {
     var pinTimer: Timer?
     var timeoutTimer: Timer?     // 兜底：热键失效/被占用时也能自动恢复
     var battTimer: Timer?        // 黑屏期间的电量守卫
+    var restoreRetry: Timer?     // 亮度恢复失败后的持续重试（屏幕不能就此黑着）
+    var configMtime: Date?       // config.json 被改动时热重载（CLI 与 App 行为一致）
 
     func restore() {
         guard blacked else { return }
@@ -777,9 +894,23 @@ func runService(keyCode: Int64) -> Never {
         pinTimer?.invalidate(); pinTimer = nil
         timeoutTimer?.invalidate(); timeoutTimer = nil
         battTimer?.invalidate(); battTimer = nil
+        restoreRetry?.invalidate(); restoreRetry = nil
         let target = cfg.restoreFixed ?? saved
         log("service 恢复显示 \(target)")
-        restoreBrightness(target)
+        // 恢复失败不能就此罢休：屏幕会一直黑着，而常驻服务本身还在运行，
+        // 用户很难想到要杀进程。必须持续重试直到真的亮回来。
+        if !restoreBrightness(target) {
+            log("错误：亮度恢复失败，转入持续重试")
+            notify("亮度恢复失败，正在持续重试")
+            let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { t in
+                if restoreBrightness(target) {
+                    log("重试成功，亮度已恢复 \(target)")
+                    t.invalidate(); restoreRetry = nil
+                }
+            }
+            RunLoop.main.add(rt, forMode: .common)
+            restoreRetry = rt
+        }
         if nosleepSystemOn {
             _ = helperExec("off"); nosleepSystemOn = false
             try? fm.removeItem(atPath: nosleepStateFile)
@@ -797,9 +928,60 @@ func runService(keyCode: Int64) -> Never {
     }
     /// 返回 false = 没能进入黑屏（亮度接口不可用或电量过低）。调用方必须据此提示用户，
     /// 否则会出现「命令看起来成功、屏幕其实还亮着」的静默失败。
+    /// 热键动作单独抽出来：配置热重载后重新注册时复用同一份行为，避免两处逻辑分叉
+    func hotkeyAction() {
+        log("热键触发")
+        if blacked { restore() } else { _ = blackout() }
+    }
+
+    /// 兜底超时 + 电量守卫。抽成函数以便配置热重载后按新值重排。
+    func scheduleGuards() {
+        timeoutTimer?.invalidate(); timeoutTimer = nil
+        if cfg.timeout > 0 {
+            let tt = Timer.scheduledTimer(withTimeInterval: cfg.timeout, repeats: false) { _ in
+                log("兜底超时 \(Int(cfg.timeout))s，自动恢复")
+                restore()
+            }
+            RunLoop.main.add(tt, forMode: .common)
+            timeoutTimer = tt
+        }
+        battTimer?.invalidate(); battTimer = nil
+        if cfg.batteryFloor > 0 {
+            let bt = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+                guard blacked else { return }
+                let b = batteryStatus()
+                guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
+                let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
+                log(m); notify(m)
+                restore()
+            }
+            RunLoop.main.add(bt, forMode: .common)
+            battTimer = bt
+        }
+    }
+
+    /// config.json 被改动（含菜单栏 App 或 CLI 修改）时自动重载，无需重启服务。
+    /// 与菜单栏 App 行为保持一致，否则用户改完配置会困惑「为什么没生效」。
+    func reloadConfigIfChanged() {
+        guard let a = try? fm.attributesOfItem(atPath: configFile),
+              let m = a[.modificationDate] as? Date else { return }
+        if let old = configMtime, m > old {
+            let n = loadConfig()
+            let keyChanged = n.keyCode != cfg.keyCode || n.modFlags != cfg.modFlags
+            cfg = n
+            if keyChanged { installHotkey(keyCode: cfg.keyCode, modFlags: cfg.modFlags, fire: hotkeyAction) }
+            if blacked { scheduleGuards() }
+            log("配置已自动重载 热键=\(modsText(cfg.modFlags))\(keyName(cfg.keyCode))")
+        }
+        configMtime = m
+    }
+
+    /// 返回 false = 没能进入黑屏（亮度接口不可用或电量过低）。调用方必须据此提示用户，
+    /// 否则会出现「命令看起来成功、屏幕其实还亮着」的静默失败。
     @discardableResult
     func blackout() -> Bool {
         guard !blacked else { return true }
+        restoreRetry?.invalidate(); restoreRetry = nil
         guard dsAvailable else {
             return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
         }
@@ -836,31 +1018,7 @@ func runService(keyCode: Int64) -> Never {
         }
         RunLoop.main.add(t, forMode: .common)
         pinTimer = t
-        // 兜底超时（与菜单栏 App 一致）：这是热键注册失败/被占用时唯一的自动恢复手段，
-        // 缺失会导致「黑屏后无任何自动恢复途径」的永久黑屏。
-        timeoutTimer?.invalidate(); timeoutTimer = nil
-        if cfg.timeout > 0 {
-            let tt = Timer.scheduledTimer(withTimeInterval: cfg.timeout, repeats: false) { _ in
-                log("兜底超时 \(Int(cfg.timeout))s，自动恢复")
-                restore()
-            }
-            RunLoop.main.add(tt, forMode: .common)
-            timeoutTimer = tt
-        }
-        // 电量守卫：黑屏期间每 30s 复查，跌破下限立即恢复
-        battTimer?.invalidate(); battTimer = nil
-        if cfg.batteryFloor > 0 {
-            let bt = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-                guard blacked else { return }
-                let b = batteryStatus()
-                guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
-                let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
-                log(m); notify(m)
-                restore()
-            }
-            RunLoop.main.add(bt, forMode: .common)
-            battTimer = bt
-        }
+        scheduleGuards()
         log("service 进入黑屏，原亮度 \(saved)，兜底 \(Int(cfg.timeout))s，电量下限 \(cfg.batteryFloor)%")
         return true
     }
@@ -871,10 +1029,7 @@ func runService(keyCode: Int64) -> Never {
         exit(0)
     }
 
-    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags) {
-        log("热键触发")
-        if blacked { restore() } else { _ = blackout() }
-    }
+    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags, fire: hotkeyAction)
 
     // 信号：CLI 用 SIGUSR1(关)/SIGUSR2(开)/SIGTERM(退出)，经命令文件 + 标志双通道。
     // 传统 handler 置位全局标志，主循环 Timer 轮询执行（AppKit 下 GCD signal source 不可靠）。
@@ -885,6 +1040,7 @@ func runService(keyCode: Int64) -> Never {
     signal(SIGTERM) { _ in cliSignalTerm = true }
     signal(SIGINT)  { _ in cliSignalTerm = true }
     let sigTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        reloadConfigIfChanged()
         if cliSignalOff { cliSignalOff = false; log("收到 SIGUSR1"); blackout() }
         if cliSignalOn  { cliSignalOn = false;  log("收到 SIGUSR2"); restore() }
         if cliSignalTerm { log("收到终止信号"); shutdown() }
@@ -943,6 +1099,161 @@ func rejectReason() -> String? {
     let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
     try? fm.removeItem(atPath: rejectFile)
     return t.isEmpty ? nil : t
+}
+
+/// 无常驻服务时启动一次性 daemon（关屏）。off 与 toggle 共用，避免两条路径行为分叉。
+func startOneShotDaemon(extra: [String]) -> Int32 {
+    var dargs = ["daemon"]
+    dargs.append(contentsOf: extra)
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exePath)
+    p.arguments = dargs
+    p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
+    do { try p.run() } catch {
+        FileHandle.standardError.write("启动失败: \(error)\n".data(using: .utf8)!)
+        return 1
+    }
+    _ = waitUntil(timeout: 3.0) { daemonRunning() != nil }
+    if let r = daemonRunning() {
+        print("已进入黑屏模式 pid=\(r.pid) 原亮度=\(r.brightness)")
+        print("恢复方式: 热键 \(modsText(loadConfig().modFlags))\(keyName(loadConfig().keyCode))  /  blankscreen on  /  远程执行同一命令")
+        return 0
+    }
+    if let reason = rejectReason() {
+        FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
+        return 1
+    }
+    print("启动失败，请查看 \(logPath)")
+    return 1
+}
+
+/// 父进程已经消失的 caffeinate —— 真的孤儿（正常 caffeinate -w 会随父进程自动退出）。
+/// 刻意不把「父进程不是 blankscreen」算作孤儿：用户自己起的 caffeinate 不该被误报。
+func orphanCaffeinate() -> [Int32] {
+    guard let out = runCapture("/usr/bin/pgrep", ["-x", "caffeinate"]) else { return [] }
+    var res: [Int32] = []
+    for tok in out.split(separator: "\n") {
+        guard let pid = Int32(tok.trimmingCharacters(in: .whitespaces)) else { continue }
+        guard let pp = runCapture("/bin/ps", ["-o", "ppid=", "-p", String(pid)]),
+              let ppid = Int32(pp.trimmingCharacters(in: .whitespaces)) else { continue }
+        if kill(ppid, 0) != 0 { res.append(pid) }
+    }
+    return res
+}
+
+/// 综合自检：把「能不能关屏、谁在跑、有没有残留」一次性摆出来。
+/// 退出码 0 = 无致命问题，1 = 存在必须修复的问题（供脚本与 CI 使用）。
+func runDoctor() -> Int32 {
+    var errors: [String] = []
+    var warns: [String] = []
+
+    print("BlankScreen 诊断 —— v\(BS_VERSION) (\(BS_COMMIT))")
+    print("系统: \(ProcessInfo.processInfo.operatingSystemVersionString)")
+
+    print("\n【关屏能力】")
+    if dsAvailable {
+        print("  ✅ 亮度接口 DisplayServices 可用，当前亮度 \(readBrightness())")
+    } else {
+        errors.append("DisplayServices 不可用")
+        print("  ❌ 亮度接口不可用：本 macOS 可能已移除该私有框架，关屏功能整体失效")
+    }
+    for id in onlineDisplays() {
+        var v: Float = -1
+        var ok = false
+        if let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") {
+            ok = unsafeBitCast(p, to: DSGet.self)(id, &v) == 0
+        }
+        let tag = id == CGMainDisplayID() ? "主显示器" : "外接显示器"
+        if ok {
+            print("  ✅ \(tag) id=\(id) 亮度 \(String(format: "%.3f", v))（可用亮度归零关闭）")
+        } else {
+            warns.append("显示器 \(id) 不支持软件亮度")
+            print("  ⚠️  \(tag) id=\(id) 不支持软件亮度控制（HDMI/DVI/DP 外接屏常见），关屏时这块屏不会熄灭")
+        }
+    }
+
+    print("\n【配置】\(configFile)")
+    let c = loadConfig()
+    print("  热键 \(modsText(c.modFlags))\(keyName(c.keyCode))　兜底 \(Int(c.timeout))s　"
+          + "电量下限 \(c.batteryFloor)%　关屏联动防睡眠 \(c.autoNosleep ? "开" : "关")")
+    if c.modFlags == 0 {
+        errors.append("热键无修饰键")
+        print("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（blankscreen config --mods cmd,shift --key 0）")
+    }
+
+    print("\n【常驻进程】")
+    if let pid = servicePid() {
+        print("  ✅ 常驻服务运行中 pid=\(pid)，\(fm.fileExists(atPath: stateFile) ? "当前黑屏中" : "当前正常显示")")
+    } else if let r = daemonRunning() {
+        print("  ✅ 一次性黑屏 daemon pid=\(r.pid)，待恢复亮度 \(r.brightness)")
+    } else {
+        warns.append("无常驻进程")
+        print("  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕")
+        print("     → 启动菜单栏 App，或安装 CLI 常驻服务（blankscreen service install）")
+    }
+    if fm.fileExists(atPath: serviceFile) && servicePid() == nil {
+        warns.append("service.pid 陈旧")
+        print("  ⚠️  service.pid 指向已不存在的进程（上次异常退出），下次启动会自动清理")
+    }
+    if fm.fileExists(atPath: stateFile), servicePid() == nil, daemonRunning() == nil {
+        errors.append("残留黑屏状态")
+        print("  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着")
+        print("     → 执行 `blankscreen on` 恢复，或重启菜单栏 App 自动自愈")
+    }
+
+    print("\n【开机自启】")
+    let bar = runProbe("com.blankscreen.bar")
+    let agent = runProbe(label)
+    print("  菜单栏 App: \(bar ? "✅ 已注册" : "未注册（设置里勾选「登录时启动」）")")
+    print("  CLI 常驻服务: \(agent ? "已注册" : "未注册")")
+    if bar && agent {
+        warns.append("双常驻")
+        print("  ⚠️  两者同时注册会互相抢占状态，建议只保留菜单栏 App")
+    }
+
+    print("\n【防睡眠】")
+    let b = batteryStatus()
+    print("  电源: \(b.onBattery ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")" : "电源适配器")")
+    if helperInstalled() {
+        print("  ✅ 提权助手已安装")
+        if let d = helperExec("detect") { print("     \(d)") }
+        if helperOutdated() {
+            warns.append("提权助手过旧")
+            print("  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方")
+            print("     → 重新安装：blankscreen nosleep install-helper --force（需输入一次密码）")
+        }
+        print("  系统级开关: \(systemSleepDisabled() ? "开启（系统当前不会睡眠）" : "关闭")")
+        if let pid = nosleepPid() { print("  守护进程: 运行中 pid=\(pid)") }
+        else if systemSleepDisabled() {
+            errors.append("disablesleep 残留")
+            print("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位")
+        }
+    } else {
+        print("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠")
+        print("     → 一键安装：blankscreen nosleep setup")
+    }
+
+    print("\n【残留进程】")
+    let orphans = orphanCaffeinate()
+    if orphans.isEmpty {
+        print("  ✅ 无孤儿 caffeinate")
+    } else {
+        warns.append("孤儿 caffeinate")
+        for o in orphans {
+            print("  ⚠️  caffeinate pid=\(o) 的父进程已不存在，属崩溃残留：kill \(o)")
+        }
+    }
+
+    print("")
+    if !errors.isEmpty {
+        print("结论：❌ \(errors.count) 个问题需要修复 —— \(errors.joined(separator: "；"))")
+    } else if !warns.isEmpty {
+        print("结论：⚠️  \(warns.count) 项提示（不影响基本使用）")
+    } else {
+        print("结论：✅ 一切正常")
+    }
+    print("日志：\(logPath)")
+    return errors.isEmpty ? 0 : 1
 }
 
 switch cmd {
@@ -1091,10 +1402,12 @@ case "nosleep":
     case "setup":
         // 一键到位：装助手 → 开关屏联动 → 立即开启系统级防睡眠。每一步幂等，可重复执行。
         print("BlankScreen 一键防睡眠")
-        if helperInstalled() {
+        if helperInstalled(), !helperOutdated() {
             print("① 提权助手已安装，跳过")
         } else {
-            print("① 安装提权助手（macOS 将弹出密码框）…")
+            print(helperOutdated()
+                  ? "① 提权助手版本过旧，重新安装（macOS 将弹出密码框）…"
+                  : "① 安装提权助手（macOS 将弹出密码框）…")
             let (ok, out) = runAsAdmin(installHelperScript(NSUserName()))
             guard ok else {
                 print("   安装失败: \(out)")
@@ -1178,7 +1491,11 @@ case "nosleep":
             print(installHelperScript(NSUserName()))
             exit(0)
         }
-        if helperInstalled() { print("提权助手已安装，无需重复操作"); exit(0) }
+        // 旧版助手缺少持有者记账，必须允许覆盖安装，否则用户永远升不了级
+        if helperInstalled(), !args.contains("--force") {
+            print("提权助手已安装，无需重复操作（加 --force 可覆盖安装 / 升级）")
+            exit(0)
+        }
         print("将安装一个仅允许「\(NSUserName())」以 root 执行 \(helperPath)")
         print("（四个固定参数：on / off / status / detect）的授权条目。")
         print("macOS 会弹出密码框，请输入你的登录密码。")
@@ -1226,8 +1543,18 @@ case "config":
     var c = loadConfig()
     var i = 2
     while i < args.count {
-        if args[i] == "--key", i + 1 < args.count { c.keyCode = Int64(args[i + 1]) ?? 11; i += 2 }
-        else if args[i] == "--timeout", i + 1 < args.count { c.timeout = Double(args[i + 1]) ?? 43200; i += 2 }
+        if args[i] == "--key", i + 1 < args.count {
+            guard let k = Int64(args[i + 1]), (0...127).contains(k) else {
+                print("错误：--key 需要 0-127 的虚拟键码，收到: \(args[i + 1])"); exit(1)
+            }
+            c.keyCode = k; i += 2
+        }
+        else if args[i] == "--timeout", i + 1 < args.count {
+            guard let t = Double(args[i + 1]), t >= 0 else {
+                print("错误：--timeout 需要非负秒数（0 = 不启用兜底），收到: \(args[i + 1])"); exit(1)
+            }
+            c.timeout = t; i += 2
+        }
         else if args[i] == "--mods", i + 1 < args.count {
             var f: UInt64 = 0
             for t in args[i + 1].lowercased().split(separator: ",") {
@@ -1243,7 +1570,15 @@ case "config":
         }
         else if args[i] == "--restore", i + 1 < args.count {
             let v = args[i + 1].lowercased()
-            c.restoreFixed = (v == "original" || v == "auto") ? nil : (Float(v) ?? 0.5); i += 2
+            if v == "original" || v == "auto" {
+                c.restoreFixed = nil
+            } else if let f = Float(v), (0...1).contains(f) {
+                c.restoreFixed = f
+            } else {
+                print("错误：--restore 需要 original（关屏前亮度）或 0.0-1.0 的数值，收到: \(args[i + 1])")
+                exit(1)
+            }
+            i += 2
         }
         else if args[i] == "--battery", i + 1 < args.count {
             if let v = Int(args[i + 1]), (0...100).contains(v) {
@@ -1295,25 +1630,10 @@ case "off":
         exit(0)
     }
     if let r = daemonRunning() { print("已在黑屏模式 (pid \(r.pid))，原亮度 \(r.brightness)"); exit(0) }
-    var dargs = ["daemon"]                            // 一次性模式
+    var extra: [String] = []                          // 一次性模式
     var i = 2
-    while i < args.count { dargs.append(args[i]); i += 1 }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: exePath)
-    p.arguments = dargs
-    p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
-    try? p.run()
-    _ = waitUntil(timeout: 3.0) { daemonRunning() != nil }
-    if let r = daemonRunning() {
-        print("已进入黑屏模式 pid=\(r.pid) 原亮度=\(r.brightness)")
-        print("恢复方式: 热键 ⌃⌥⌘B  /  blankscreen on  /  远程执行同一命令")
-    } else if let reason = rejectReason() {
-        FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
-        exit(1)
-    } else {
-        print("启动失败，请查看 \(logPath)")
-        exit(1)
-    }
+    while i < args.count { extra.append(args[i]); i += 1 }
+    exit(startOneShotDaemon(extra: extra))
 
 case "on":
     if let pid = servicePid() {
@@ -1344,8 +1664,54 @@ case "status":
     }
     print("电源: \(battText)，电量下限 \(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : "不限")")
 
+case "version":
+    print("blankscreen \(BS_VERSION) (\(BS_COMMIT))")
+    print("  macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+    print("  二进制: \(exePath)")
+    print("  状态目录: \(base)")
+
+case "doctor":
+    exit(runDoctor())
+
+case "toggle":
+    // 一条命令切换，便于绑定到快捷键工具 / 远程脚本，不必先判断当前状态
+    if let pid = servicePid() {
+        let before = fm.fileExists(atPath: stateFile)
+        try? fm.removeItem(atPath: rejectFile)
+        try? "toggle".write(toFile: commandFile, atomically: true, encoding: .utf8)
+        kill(pid, SIGUSR1)                            // 菜单栏 App 认命令文件，信号仅用于唤醒
+        let changed = waitUntil(timeout: 3.0) {
+            fm.fileExists(atPath: stateFile) != before || fm.fileExists(atPath: rejectFile)
+        }
+        if let reason = rejectReason() {
+            FileHandle.standardError.write("未能切换：\(reason)\n".data(using: .utf8)!)
+            exit(1)
+        }
+        print(changed
+              ? (fm.fileExists(atPath: stateFile) ? "已进入黑屏（常驻服务 pid=\(pid)）" : "已恢复显示")
+              : "已发送切换指令（3s 内未确认，请查看 \(logPath)）")
+        exit(0)
+    }
+    if let r = daemonRunning() {
+        kill(r.pid, SIGTERM)
+        _ = waitUntil(timeout: 3.0) { daemonRunning() == nil }
+        print("已恢复显示，亮度 \(r.brightness)")
+        exit(0)
+    }
+    exit(startOneShotDaemon(extra: []))
+
 case "bright":
-    if args.count > 2, let v = Float(args[2]) {
+    if args.count > 2 {
+        // 显式校验而不是默默 clamp：越界值说明用户搞错了单位（例如当成了百分比），
+        // 静默改写成极值会让「设成 1.0 结果全黑」这类困惑无法追溯。
+        guard let v = Float(args[2]) else {
+            FileHandle.standardError.write("错误：亮度需要 0.0-1.0 的数值，收到: \(args[2])\n".data(using: .utf8)!)
+            exit(1)
+        }
+        guard (0...1).contains(v) else {
+            FileHandle.standardError.write("错误：亮度必须在 0.0-1.0 之间，收到: \(args[2])\n".data(using: .utf8)!)
+            exit(1)
+        }
         if setBrightness(v) { print("亮度 -> \(v)") }
         else {
             FileHandle.standardError.write("设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n".data(using: .utf8)!)
@@ -1366,8 +1732,10 @@ default:
     CLI 用法:
       blankscreen service install            安装常驻服务（开机自启，热键直接开关）
       blankscreen service uninstall          卸载常驻服务
-      blankscreen off / on                   进入 / 退出黑屏
+      blankscreen off / on / toggle          进入 / 退出 / 切换黑屏
       blankscreen status                     查看状态（含电源与电量）
+      blankscreen doctor                     综合自检：关屏能力、显示器可控性、进程、残留
+      blankscreen version                    查看版本
       blankscreen config --key 11            查看/修改热键、超时、电量下限
       blankscreen bright [0.0-1.0]           直接读写亮度
 

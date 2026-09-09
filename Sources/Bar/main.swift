@@ -200,6 +200,24 @@ var dsAvailable: Bool {
         && dlsym(h, "DisplayServicesSetBrightness") != nil
 }
 
+/// 所有在线显示器。只操作 CGMainDisplayID() 会漏掉外接屏——用户要的是「关屏」，即全部。
+func onlineDisplays() -> [CGDirectDisplayID] {
+    var count: UInt32 = 0
+    guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [CGMainDisplayID()] }
+    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    CGGetOnlineDisplayList(count, &ids, &count)
+    return ids.prefix(Int(count)).isEmpty ? [CGMainDisplayID()] : Array(ids.prefix(Int(count)))
+}
+
+/// 上一次设置亮度时失败的显示器（多数 HDMI/DVI/DP 外接屏不支持软件亮度）。
+/// 这类屏关不掉，必须让用户看见，而不是让他以为一切正常。
+var lastFailedDisplays: [CGDirectDisplayID] = []
+
+func setOneBrightness(_ id: CGDirectDisplayID, _ v: Float) -> Bool {
+    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
+    return unsafeBitCast(p, to: DSSet.self)(id, v) == 0
+}
+
 func readBrightness() -> Float {
     guard let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
     let f = unsafeBitCast(p, to: DSGet.self)
@@ -207,16 +225,27 @@ func readBrightness() -> Float {
     return f(CGMainDisplayID(), &v) == 0 ? v : -1
 }
 // 返回 false = 设置失败（实测成功时返回 0）。失败必须可见，否则用户会以为关屏成功、
-// 实际屏幕还亮着。
+// 实际屏幕还亮着。遍历所有在线显示器：只关主屏会让外接屏继续亮着，等于没关。
 @discardableResult
 func setBrightness(_ v: Float) -> Bool {
-    guard let h = dsHandle, let p = dlsym(h, "DisplayServicesSetBrightness") else { return false }
-    return unsafeBitCast(p, to: DSSet.self)(CGMainDisplayID(), v) == 0
+    var ok = false
+    var failed: [CGDirectDisplayID] = []
+    for id in onlineDisplays() {
+        if setOneBrightness(id, v) { ok = true } else { failed.append(id) }
+    }
+    lastFailedDisplays = failed
+    return ok
 }
+/// 恢复必须尽最大努力成功：失败意味着用户永远看不见屏幕，因此多次重试而非「设一次就走」
 @discardableResult
 func restoreBrightness(_ v: Float) -> Bool {
-    let a = setBrightness(v); usleep(300_000); let b = setBrightness(v)
-    return a || b
+    for i in 0..<6 {
+        var ok = false
+        for id in onlineDisplays() { if setOneBrightness(id, v) { ok = true } }
+        if ok { return true }
+        usleep(UInt32(150_000 * (i + 1)))
+    }
+    return false
 }
 
 // MARK: - 电池状态（pmset -g batt，免授权；与 CLI 同一判定口径）
@@ -281,6 +310,7 @@ final class ScreenController {
     var configMtime: Date? = nil
     var selfTesting = false
     var onStateChange: (() -> Void)?
+    var restoreRetry: Timer?      // 亮度恢复失败后的持续重试（屏幕不能就此黑着）
 
     // MARK: 防睡眠
     //
@@ -298,7 +328,7 @@ final class ScreenController {
     }
 
     private func helperExec(_ arg: String) -> String? {
-        guard ["on", "off", "status"].contains(arg), helperInstalled() else { return nil }
+        guard ["on", "off", "status", "detect"].contains(arg), helperInstalled() else { return nil }
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
         p.arguments = ["-n", helperPath, arg]
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = nil
@@ -312,6 +342,13 @@ final class ScreenController {
     func systemSleepDisabled() -> Bool {
         guard let s = helperExec("status"), let v = Int(s) else { return false }
         return v == 1
+    }
+
+    /// 提权助手版本是否过旧：带「持有者记账」的版本 detect 会输出 owners= 字段。
+    /// 旧版没有记账——关屏联动与手动防睡眠会互相踩掉对方的 disablesleep，需要重装助手。
+    func helperOutdated() -> Bool {
+        guard helperInstalled(), let d = helperExec("detect") else { return false }
+        return !d.contains("owners=")
     }
 
     var nosleepLevelText: String {
@@ -332,6 +369,14 @@ final class ScreenController {
     @discardableResult
     func startNosleep(auto: Bool = false) -> Bool {
         guard !nosleepOn else { return true }
+        // 电量下限对防睡眠同样强制生效：合盖 + 电池 + 不睡是最容易耗尽电量的组合，
+        // 机器在包里一直跑到没电，用户却毫不知情。
+        if cfg.batteryFloor > 0 {
+            let b = batteryStatus()
+            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
+                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消开启防睡眠（避免耗尽电池）")
+            }
+        }
         let pid = ProcessInfo.processInfo.processIdentifier
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
@@ -383,6 +428,7 @@ final class ScreenController {
     @discardableResult
     func blackout() -> Bool {
         guard !blacked else { return true }
+        restoreRetry?.invalidate(); restoreRetry = nil
         guard dsAvailable else {
             return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
         }
@@ -445,7 +491,21 @@ final class ScreenController {
         if nosleepAuto { stopNosleep("已恢复显示") }
         let target = cfg.restoreFixed ?? saved
         blog("bar: 恢复显示 \(target)")
-        restoreBrightness(target)
+        // 恢复失败不能就此罢休：屏幕会一直黑着。持续重试直到真的亮回来。
+        if !restoreBrightness(target) {
+            blog("bar: 错误：亮度恢复失败，转入持续重试")
+            notifyUser("亮度恢复失败，正在持续重试")
+            restoreRetry?.invalidate()
+            let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
+                guard let self = self else { t.invalidate(); return }
+                if restoreBrightness(target) {
+                    blog("bar: 重试成功，亮度已恢复 \(target)")
+                    t.invalidate(); self.restoreRetry = nil
+                }
+            }
+            RunLoop.main.add(rt, forMode: .common)
+            restoreRetry = rt
+        }
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: stateFile)
         onStateChange?()
@@ -690,7 +750,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     }
 
     private func build() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 660),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 730),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "BlankScreen 设置"
         w.delegate = self
@@ -779,6 +839,13 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         sliderRow.addArrangedSubview(restoreValueLabel)
         root.addArrangedSubview(sliderRow)
 
+        // —— 安全提醒
+        root.addArrangedSubview(section("安全提醒"))
+        root.addArrangedSubview(wrapLabel(
+            "关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。"
+            + "但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。"
+            + "离开座位前请手动锁屏（⌃⌘Q）。"))
+
         // —— 开机自启
         root.addArrangedSubview(section("启动"))
         loginBtn = NSButton(checkboxWithTitle: "登录时自动启动（菜单栏常驻）", target: self, action: #selector(onLoginToggled(_:)))
@@ -793,6 +860,12 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         checkBtn = NSButton(title: "运行自检", target: self, action: #selector(onCheck(_:)))
         btnRow.addArrangedSubview(checkBtn)
         root.addArrangedSubview(btnRow)
+
+        // 版本号放在底部：`关于`面板之外，用户反馈问题时能一眼报出版本
+        let ver = NSTextField(labelWithString: "BlankScreen v\(BS_VERSION)  (\(BS_COMMIT))")
+        ver.font = .systemFont(ofSize: 11)
+        ver.textColor = .tertiaryLabelColor
+        root.addArrangedSubview(ver)
 
         root.addArrangedSubview(NSView())
         return w
@@ -850,8 +923,12 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         nosleepBtn.state = cfg.autoNosleep ? .on : .off
         if ctl.helperInstalled() {
             helperBtn.title = "卸载提权助手"
-            helperLabel.stringValue = "提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。" +
-                "（仅授权单个 root:wheel 脚本的四个固定参数）"
+            // 过旧的助手缺少「多持有者记账」：关屏联动与手动防睡眠会互相踩掉对方的设置
+            helperLabel.stringValue = ctl.helperOutdated()
+                ? "提权助手：版本过旧 —— 缺少多持有者记账，关屏联动与手动防睡眠会互相关掉对方。"
+                  + "请卸载后重新安装（需要输入一次登录密码）。"
+                : "提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。" +
+                  "（仅授权单个 root:wheel 脚本的四个固定参数）"
         } else {
             helperBtn.title = "安装提权助手…"
             helperLabel.stringValue = "提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，" +
@@ -1267,6 +1344,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 // MARK: - 入口
+if CommandLine.arguments.contains("--version") {
+    print("BlankScreenBar \(BS_VERSION) (\(BS_COMMIT))")
+    exit(0)
+}
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)          // 不显示 Dock 图标
 let delegate = AppDelegate()

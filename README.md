@@ -105,16 +105,22 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by 
 blankscreen off          # black out now (one-shot daemon, auto-restores after timeout)
 blankscreen off --timeout 3600
 blankscreen on           # restore (also works over SSH while the bar app runs)
+blankscreen toggle       # one-command switch — handy for hotkey tools and remote scripts
 blankscreen status
+blankscreen doctor       # full self-check: display control, processes, leftovers
+blankscreen version      # print version (include it when reporting issues)
 blankscreen bright 0.5   # read/write system brightness directly
 blankscreen service install    # run the CLI as a launchd service (menu app not required)
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
 blankscreen config --battery 20      # battery floor %: refuse/exit blackout below it (0 = off)
 blankscreen config --auto-nosleep    # link anti-sleep to blackout; auto-reset on restore
-blankscreen status                   # now also shows power source and battery %
 ```
 
 Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscreen config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
+
+**Multiple displays:** blackout applies to every online display. However, most HDMI/DVI/DP
+external monitors don't support software brightness, so those panels can't be dimmed —
+`blankscreen doctor` tells you exactly which one, instead of leaving you guessing.
 
 ## Anti-sleep (keep working with the lid closed / on battery / headless)
 
@@ -145,6 +151,10 @@ Safety design:
 - sudoers grants a single user, running as root, exactly those four arguments
 - Uninstall resets `disablesleep 0` *before* deleting the helper — no "system never sleeps again" leftovers
 - A boot-time LaunchDaemon plus a self-heal check on every start reset any state left by a crashed process
+- **Owner accounting:** `disablesleep` is a single global switch that "blackout-linked anti-sleep"
+  and "manual anti-sleep" may both depend on. The helper records each owner, so when one stops it
+  only unregisters itself — it never disables the anti-sleep the other one still relies on.
+  (Ledger lives in `/var/db/blankscreen-nosleep`, owned by root; unprivileged users can't forge owners.)
 - The battery floor applies to anti-sleep too — closed lid + battery + no sleep is the fastest way to drain a battery
 
 ## Uninstall
@@ -170,22 +180,34 @@ Safety design:
 
 ```bash
 make            # build CLI + app into build/
+make test       # end-to-end smoke test (arg validation, config round-trip, anti-sleep, asset parity)
 make dev-tools  # build debugging helpers into build/dev-tools/
 make clean
 ```
 
-Source layout: `Sources/blankscreen.swift` (CLI), `Sources/BlankScreenBar.swift` (menu bar app), `dev-tools/` (screenshot/brightness/probe helpers used during development).
+Source layout (Swift requires the top-level file to be named `main.swift`, so each target gets its own directory):
+
+- `Sources/CLI/main.swift` — command-line tool
+- `Sources/Bar/main.swift` — menu bar app
+- `Sources/Shared/Version.swift` — generated at build time
+- `dev-tools/` — helpers plus `smoke.sh`
+
+`make test` skips cases the current environment can't run (e.g. it won't do a real blackout while
+the menu bar app is live, since that would interrupt your session). Set `SMOKE_FULL=1` to force it.
 
 ## Known limitations
 
-- **External displays are not dimmed.** Brightness is only set on the main display
-  (`CGMainDisplayID`). With an external monitor attached, the built-in display goes dark
-  while the external one keeps showing its image. Covering every display would need
-  DDC/CI, which Apple Silicon does not expose reliably.
+- **Some external displays can't be turned off.** Dimming relies on the software brightness API,
+  which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout.
+  `blankscreen doctor` names the exact display. Powering them down would require true display
+  sleep, which breaks remote frames — this tool deliberately doesn't do that.
 
 - The panel is **not powered down** — this is intentional. Backlight is driven to 0, so
   the framebuffer keeps rendering and screen-sharing / remote-desktop sessions keep
   working. True display sleep would break remote access; see [How it works](#how-it-works).
+
+- **Blackout is not a lock screen.** While blacked out, anyone with physical access to the
+  keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
 
 ## License
 

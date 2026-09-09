@@ -16,15 +16,17 @@ jobs:
       - name: Build universal binaries (arm64 + x86_64)
         run: make all
 
-      - name: Smoke test CLI
-        run: |
-          ./build/blankscreen status
-          ./build/blankscreen help 2>/dev/null || ./build/blankscreen
+      - name: Smoke test（端到端冒烟，含参数校验 / 配置往返 / 资产一致性）
+        run: make test
+
+      - name: Show doctor report
+        run: ./build/blankscreen doctor || true
 
       - name: Verify architectures
         run: |
           lipo -info build/blankscreen
           lipo -info build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
+          ./build/blankscreen version
 
       - name: Build installer (.pkg)
         run: make pkg

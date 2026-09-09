@@ -22,3 +22,6 @@ blctl
 *.swp
 *~
 .build/
+
+# 构建时由 Makefile 生成（版本与 commit 注入），不应入库
+Sources/Shared/Version.swift
