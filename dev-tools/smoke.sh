@@ -66,7 +66,7 @@ echo "【3】配置读写往返"
 $B config >/dev/null 2>&1
 # 压缩掉空白再取字段：App 保存的是 pretty-printed JSON（"batteryFloor" : 20），
 # CLI 保存的是紧凑格式，两种都要能解析
-json_batt() { tr -d ' \n\t' < "$CFG" 2>/dev/null | grep -o '"batteryFloor":[0-9]*' | grep -o '[0-9]*$'; }
+json_batt() { [ -f "$CFG" ] || return 0; tr -d ' \n\t' < "$CFG" 2>/dev/null | grep -o '"batteryFloor":[0-9]*' | grep -o '[0-9]*$'; }
 orig=$(json_batt); orig=${orig:-20}
 $B config --battery 35 >/dev/null 2>&1
 now=$(json_batt)
