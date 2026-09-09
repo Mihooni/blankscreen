@@ -87,7 +87,8 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by 
 
 **Menu bar app** — click ☀ / 🌙 in the menu bar:
 
-- 关闭显示器 / 恢复显示 — toggle
+- Toggle display / restore
+- 防睡眠 (anti-sleep) — keep the system awake while blacked out (see the anti-sleep section)
 - 设置… — hotkey combo + key, fallback timeout, restore-brightness policy, launch at login
 - 热键自检 — synthesizes your hotkey once and verifies the delivery path (no side effects)
 - 打开日志
@@ -103,10 +104,39 @@ blankscreen bright 0.5   # read/write system brightness directly
 blankscreen service install    # run the CLI as a launchd service (menu app not required)
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
 blankscreen config --battery 20      # battery floor %: refuse/exit blackout below it (0 = off)
+blankscreen config --auto-nosleep    # link anti-sleep to blackout; auto-reset on restore
 blankscreen status                   # now also shows power source and battery %
 ```
 
 Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscreen config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
+
+## Anti-sleep (keep working with the lid closed / on battery / headless)
+
+Blackout only kills the backlight — the system itself still sleeps on schedule. If the machine must keep working while blacked out (remote access, downloads, closed-clamshell use), enable anti-sleep:
+
+```bash
+blankscreen nosleep on                     # process-level (caffeinate; effective on AC power only)
+blankscreen nosleep on --system            # system-level (covers battery + lid; requires the helper)
+blankscreen nosleep on --timeout 3600      # auto-stop after a duration
+blankscreen nosleep status                 # level / power source / uptime
+blankscreen nosleep off                    # stop and reset
+```
+
+**Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
+
+```bash
+sudo blankscreen nosleep install-helper    # least privilege: sudoers limited to this tool, 4 whitelisted args
+blankscreen nosleep detect                 # check disablesleep support on this system
+sudo blankscreen nosleep uninstall-helper  # uninstall (resets disablesleep before removal)
+```
+
+Safety design:
+
+- The helper is a whitelisted script that only accepts `on` / `off` / `status` / `detect` — it cannot be abused to run arbitrary commands
+- sudoers grants a single user, running as root, exactly those four arguments
+- Uninstall resets `disablesleep 0` *before* deleting the helper — no "system never sleeps again" leftovers
+- A boot-time LaunchDaemon plus a self-heal check on every start reset any state left by a crashed process
+- The battery floor applies to anti-sleep too — closed lid + battery + no sleep is the fastest way to drain a battery
 
 ## Uninstall
 

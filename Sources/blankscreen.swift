@@ -29,6 +29,20 @@ let commandFile = base + "/command"        // CLI -> 菜单栏 App 的指令文�
 let rejectFile = base + "/reject"
 let serviceLog = base + "/service.log"
 let label = "com.blankscreen.agent"
+
+// MARK: - 防睡眠（nosleep）
+// caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，所以「电池供电」和
+// 「合盖」两个场景进程级断言根本无效，只能走 pmset disablesleep（需 root）。
+// 于是防睡眠分为两层：
+//   Level 1  零权限：caffeinate（仅 AC 时有效，覆盖空闲/显示器睡眠）
+//   Level 2  需 helper（默认不安装）：pmset disablesleep（覆盖电池 + 合盖）
+let nosleepPidFile = base + "/nosleep.pid"          // 防睡眠守护进程
+let nosleepStateFile = base + "/nosleep.state"      // 记录当前层级与开启时间
+let helperDir = "/Library/PrivilegedHelperTools"
+let helperPath = helperDir + "/com.blankscreen.pmset"
+let sudoersPath = "/etc/sudoers.d/blankscreen"
+let resetDaemon = "/Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist"
+
 let fm = FileManager.default
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
@@ -105,8 +119,9 @@ struct Config: Codable {
     var timeout: Double = 43200                              // 一次性模式安全兜底，秒；0 = 不限
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
+    var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -115,6 +130,7 @@ struct Config: Codable {
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
+        autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
     }
 }
 func loadConfig() -> Config {
@@ -191,6 +207,341 @@ func notify(_ msg: String) {
     _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""])
 }
 
+// MARK: - 提权助手（防睡眠 Level 2：覆盖电池与合盖）
+//
+// 为什么必须有它：caffeinate -s 的断言「仅 AC 电源有效」（man caffeinate 明写），
+// 所以电池供电与合盖这两种防睡眠场景，进程级断言根本无效。
+//
+// 安全模型（吸取 Sleepless / Amphetamine 的教训，我们的约束比二者都更窄）：
+//   * helper 放 /Library/PrivilegedHelperTools（root:wheel，普通用户不可写）→ 无法被替换提权
+//   * sudoers 精确到「单用户 + (root) + 四个字面量参数各一条」，不接受通配
+//     （Sleepless 是 <user> ALL=(root)，Amphetamine 是 %admin ALL=(ALL)，我们更窄）
+//   * 默认不安装：用户显式执行 install-helper 才会装（会弹系统密码框）
+//   * 开机强制复位：disablesleep 是持久全局设置，崩溃/卸载后若不复位会把系统
+//     永久留在「永不睡眠」状态（本机 Amphetamine 就是活证据：SleepDisabled=1、7 天未睡眠）
+
+/// 三个条件齐全才算已安装。只查文件会出现「装了一半」却静默降级的情况。
+func helperInstalled() -> Bool {
+    guard fm.isExecutableFile(atPath: helperPath),
+          (try? String(contentsOfFile: sudoersPath, encoding: .utf8)) != nil else { return false }
+    return true
+}
+
+/// 经 sudo -n 调用 helper。arg 走白名单，杜绝参数注入。
+/// 返回 nil = 不可用（未安装 / 授权失效 / pmset 已移除该选项），调用方必须据此降级并告知用户。
+func helperExec(_ arg: String) -> String? {
+    guard ["on", "off", "status", "detect"].contains(arg), helperInstalled() else { return nil }
+    return runCapture("/usr/bin/sudo", ["-n", helperPath, arg])?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// 系统级防睡眠当前是否真的生效（回读真实状态，不靠自己记的标志）
+func systemSleepDisabled() -> Bool {
+    guard let s = helperExec("status"), let v = Int(s) else { return false }
+    return v == 1
+}
+
+/// 把脚本交给 root 执行（触发系统密码框）。脚本先落盘再执行，避免 shell 多层转义出错。
+func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
+    let f = "/tmp/com.blankscreen.install." + String(ProcessInfo.processInfo.processIdentifier) + ".sh"
+    do {
+        try scriptBody.write(toFile: f, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f)
+    } catch { return (false, "无法写入临时脚本: \(error)") }
+    defer { try? fm.removeItem(atPath: f) }
+    let out = runCapture("/usr/bin/osascript",
+                         ["-e", "do shell script \"\(f)\" with administrator privileges"])
+    return (out != nil, out ?? "用户取消或授权失败")
+}
+
+// MARK: - 防睡眠状态
+
+struct NosleepInfo { var level = "caffeinate"; var since = Date(); var systemOn = false }
+
+func nosleepPid() -> Int32? {
+    // 归属校验不能省：pid 被系统复用后发信号会打到无关进程上
+    guard let s = try? String(contentsOfFile: nosleepPidFile, encoding: .utf8),
+          let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+          kill(pid, 0) == 0, isOurs(pid) else { return nil }
+    return pid
+}
+
+func nosleepInfo() -> NosleepInfo? {
+    guard nosleepPid() != nil,
+          let s = try? String(contentsOfFile: nosleepStateFile, encoding: .utf8) else { return nil }
+    let p = s.split(separator: "|").map(String.init)
+    var i = NosleepInfo()
+    if p.count >= 1 { i.level = p[0] }
+    if p.count >= 2, let t = Double(p[1]) { i.since = Date(timeIntervalSince1970: t) }
+    if p.count >= 3 { i.systemOn = p[2] == "1" }
+    return i
+}
+
+/// 清理残留：守护进程已死但 disablesleep 仍开着时，必须复位。
+/// 这是“卸载/崩溃后系统永不睡眠”的唯一补救通道（开机 LaunchDaemon 之外的第二道防线）。
+func recoverStaleNosleep() {
+    guard nosleepPid() == nil else { return }
+    let hadState = fm.fileExists(atPath: nosleepStateFile) || fm.fileExists(atPath: nosleepPidFile)
+    try? fm.removeItem(atPath: nosleepPidFile)
+    try? fm.removeItem(atPath: nosleepStateFile)
+    guard hadState, helperInstalled(), systemSleepDisabled() else { return }
+    _ = helperExec("off")
+    log("nosleep: 检测到守护进程已消失但 disablesleep 仍开启，已自动复位")
+}
+
+// MARK: - 提权助手资产（内嵌为唯一真相源）
+//
+// 资产内嵌在二进制里，而不是随包附带散文件：CLI 可能被拷到任何位置，
+// 依赖同目录文件会让它换个地方就失效。packaging/helper/ 下的同名文件由
+// `blankscreen nosleep write-assets` 生成，便于人工审计与 CI 校验一致性。
+
+let helperScript = #"""
+#!/bin/sh
+# com.blankscreen.pmset —— 以 root 执行的极窄权限助手
+#
+# 存在的唯一理由：caffeinate -s 的断言仅在 AC 电源下有效（见 man caffeinate），
+# 因此「电池供电」与「合盖」两种防睡眠场景无法用进程级断言实现，
+# 只能求助于 pmset disablesleep 这个全局开关，而它需要 root。
+#
+# 安全约束（任意一条被破坏都必须视为漏洞）：
+#   1. 本文件必须是 root:wheel 且权限 0755；目录 /Library/PrivilegedHelperTools
+#      同样为 root:wheel —— 普通用户无法改写脚本内容。
+#   2. sudoers 中精确列出「单用户 + (root) + 每个参数各一条」，不接受通配。
+#   3. 只接受 on / off / status / detect 四个字面量，其他一律 exit 2。
+#   4. 绝不接受路径或数值参数，杜绝 pmset 被借去改其他设置。
+
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+PMS=/usr/bin/pmset
+LOG_TAG=com.blankscreen.pmset
+
+usage() {
+    echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
+    exit 2
+}
+
+[ $# -eq 1 ] || usage
+
+case "$1" in
+    on)
+        # disablesleep 未文档化：在部分系统上可能已被移除。
+        # 失败必须让调用方看得见（非 0 退出码），不能静默降级。
+        if ! "$PMS" disablesleep 1 2>/dev/null; then
+            echo "$LOG_TAG: 'pmset disablesleep 1' 失败（该选项可能已被移除）" >&2
+            exit 1
+        fi
+        echo "on"
+        ;;
+    off)
+        "$PMS" disablesleep 0 >/dev/null 2>&1
+        echo "off"
+        ;;
+    status)
+        v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+        echo "${v:-0}"
+        ;;
+    detect)
+        # 只读探测：报告当前值 + 本进程是否有写入权限。
+        #
+        # 不能用「写一次看退出码」来判定支持性 —— 实测在非 root 下
+        # `pmset disablesleep 0` 退出码为 0 却并未生效（读回值不变），
+        # 照退出码判定会得出「支持」的错误结论。
+        # 同理，这里绝不能真的写入：本机若被其他工具设了 disablesleep=1，
+        # 探测顺手改成 0 会破坏别人的状态（写入应由显式开启去做）。
+        v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+        if [ "$(/usr/bin/id -u)" = "0" ]; then
+            echo "root:current=${v:-0}"
+        else
+            echo "user:current=${v:-0}"
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac
+"""#
+
+let resetPlist = #"""
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.blankscreen.nosleep.reset —— 开机时把 disablesleep 复位为 0。
+
+  为什么必须有它：
+  pmset disablesleep 是**持久**的全局设置，写入后即使进程被 SIGKILL 也仍然生效。
+  这意味着崩溃、强退、卸载都可能把系统留在「永不睡眠」状态，且用户无从察觉。
+
+  本 LaunchDaemon 只在开机瞬间执行一次（KeepAlive=false，跑完即退），
+  保证每次启动都从干净状态开始；随后由用户显式开启防睡眠。
+  它不是常驻 root 进程，攻击面极小。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.blankscreen.nosleep.reset</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/pmset</string>
+        <string>disablesleep</string>
+        <string>0</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+"""#
+
+/// sudoers：精确到「单用户 + 仅 root + 四个字面量参数各一条」。
+/// 比 Sleepless 的 `<user> ALL=(root)` 与 Amphetamine 的 `%admin ALL=(ALL)` 都更窄。
+func sudoersBody(_ user: String) -> String {
+    let lines = ["on", "off", "status", "detect"]
+        .map { "\(user) ALL=(root) NOPASSWD: \(helperPath) \($0)" }
+    return lines.joined(separator: "\n") + "\n"
+}
+
+/// 分段拼接而非一个整段多行字符串：heredoc 的终止符必须顶格才能被 shell 识别，
+/// 而 Swift 多行字符串会整体剥离缩进，直接写在一起会让终止符带上前导空格而失效。
+func installHelperScript(_ user: String) -> String {
+    let part1 = """
+    #!/bin/sh
+    set -e
+    H="\(helperPath)"
+    S="\(sudoersPath)"
+    D="\(resetDaemon)"
+
+    /bin/mkdir -p \(helperDir)
+    /bin/cat > "$H" <<'BLANKSCREEN_HELPER_EOF'
+    """
+    let part2 = """
+    BLANKSCREEN_HELPER_EOF
+    /usr/sbin/chown root:wheel "$H"; /bin/chmod 755 "$H"
+
+    /bin/cat > "$S" <<'BLANKSCREEN_SUDOERS_EOF'
+    """
+    let part3 = """
+    BLANKSCREEN_SUDOERS_EOF
+    /usr/sbin/chown root:wheel "$S"; /bin/chmod 440 "$S"
+
+    # 写坏 sudoers 会让整台机器无法提权，所以必须先校验；失败立即回滚。
+    if ! /usr/sbin/visudo -c -f "$S" >/dev/null 2>&1; then
+        /bin/rm -f "$S"
+        echo "错误：sudoers 语法校验失败，已回滚" >&2
+        exit 1
+    fi
+
+    /bin/cat > "$D" <<'BLANKSCREEN_PLIST_EOF'
+    """
+    let part4 = """
+    BLANKSCREEN_PLIST_EOF
+    /usr/sbin/chown root:wheel "$D"; /bin/chmod 644 "$D"
+
+    echo "installed"
+    """
+    // 每段之间必须显式插入换行：Swift 多行字符串会吃掉结尾换行，
+    // 而内嵌资产的 raw string 同样不以换行结尾。少了换行，heredoc 的终止符会与
+    // 内容首行挤在同一行，导致 heredoc 整体失效（内容被当成命令参数）。
+    return part1 + "\n" + helperScript + "\n" + part2 + "\n"
+         + sudoersBody(user) + part3 + "\n" + resetPlist + "\n" + part4
+}
+
+/// 卸载顺序很关键：先复位 disablesleep，再删 helper。
+/// 反过来的话，一旦 helper 被删就再也无法复位，系统会被永久留在「永不睡眠」状态
+/// ——这正是同类工具最常见的翻车方式。
+func uninstallHelperScript() -> String {
+    """
+    #!/bin/sh
+    /usr/bin/pmset disablesleep 0 2>/dev/null || true
+    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
+    /bin/rm -f \(resetDaemon)
+    /bin/rm -f \(sudoersPath)
+    /bin/rm -f \(helperPath)
+    echo "uninstalled"
+    """
+}
+
+// MARK: - 防睡眠守护进程
+
+var nosleepStopFlag = false   // 信号处理只置位，收尾在主循环做（AppKit 下 GCD 交付不可靠）
+
+func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
+    let cfg = loadConfig()
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    var systemOn = false
+    var caff: Process?
+    var stopped = false
+
+    func stop(_ reason: String, notifyUser: Bool) {
+        guard !stopped else { return }
+        stopped = true
+        // 系统级开关是持久的，退出前必须显式复位，否则系统再也不会睡眠
+        if systemOn {
+            _ = helperExec("off")
+            log("nosleep: 已复位 disablesleep=0")
+        }
+        caff?.terminate(); caff = nil
+        try? fm.removeItem(atPath: nosleepPidFile)
+        try? fm.removeItem(atPath: nosleepStateFile)
+        log("nosleep 停止：\(reason)")
+        if notifyUser { notify("已停止防睡眠：\(reason)") }
+    }
+
+    // Level 1：进程级断言（零权限）。-w 保证本进程一旦退出 caffeinate 自动回收，杜绝孤儿。
+    let c = Process()
+    c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+    c.arguments = ["-dis", "-w", String(myPid)]
+    try? c.run()
+    caff = c
+
+    // Level 2：系统级开关（需 helper），覆盖电池 + 合盖。失败则降级但必须让用户知道。
+    var level = "caffeinate"
+    if wantSystem {
+        if let r = helperExec("on"), r == "on", systemSleepDisabled() {
+            systemOn = true
+            level = "system"
+            log("nosleep: 系统级防睡眠已开启（disablesleep=1），覆盖电池与合盖")
+        } else {
+            log("nosleep: 系统级防睡眠不可用，降级为 caffeinate（仅 AC 有效）")
+            notify("防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠")
+        }
+    }
+
+    try? String(myPid).write(toFile: nosleepPidFile, atomically: true, encoding: .utf8)
+    try? "\(level)|\(Date().timeIntervalSince1970)|\(systemOn ? 1 : 0)"
+        .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
+    log("nosleep 启动 pid=\(myPid) 层级=\(level)")
+
+    for sig in [SIGTERM, SIGINT, SIGHUP] { signal(sig) { _ in nosleepStopFlag = true } }
+
+    let poll = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+        if nosleepStopFlag { stop("收到退出信号", notifyUser: false); exit(0) }
+    }
+    RunLoop.main.add(poll, forMode: .common)
+
+    // 电量守卫：合盖 + 电池 + 不睡眠是最容易耗尽电量的组合，机器在包里发热直到没电。
+    // 所以电量下限对防睡眠同样强制生效（与关屏共用同一阈值）。
+    if cfg.batteryFloor > 0 {
+        let g = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            let b = batteryStatus()
+            guard b.onBattery, b.discharging, b.percent <= cfg.batteryFloor else { return }
+            let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动停止防睡眠"
+            log(m); stop(m, notifyUser: true); exit(0)
+        }
+        RunLoop.main.add(g, forMode: .common)
+    }
+
+    if let t = timeout, t > 0 {
+        Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in
+            log("nosleep: 超时 \(Int(t))s")
+            stop("已到设定时长 \(Int(t)) 秒", notifyUser: true); exit(0)
+        }
+    }
+    runAppLoop()
+}
+
 // 常用键位名（仅用于展示）
 let keyTable: [(String, Int64)] = [
     ("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
@@ -265,6 +616,7 @@ var cliSignalTerm = false
 // MARK: - 形态一：一次性 daemon
 func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     let cfg = loadConfig()
+    recoverStaleNosleep()   // 上次异常退出遗留的 disablesleep 必须先复位
     // DisplayServices 不可用时，黑屏根本不会发生——必须明确报错，不能让命令「成功」但屏幕还亮着
     guard dsAvailable else {
         let m = "无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）"
@@ -297,11 +649,24 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     try? String(ProcessInfo.processInfo.processIdentifier).write(toFile: pidFile, atomically: true, encoding: .utf8)
     log("daemon 启动 pid=\(ProcessInfo.processInfo.processIdentifier) 原亮度=\(saved)")
 
+    // auto-nosleep：黑屏期间同时阻止系统睡眠。系统级开关（disablesleep）是持久的，
+    // 必须在恢复显示时显式复位，否则合盖永远不睡、放在包里一直耗电。
+    var nosleepSystemOn = false
+    if cfg.autoNosleep, helperInstalled(),
+       let r = helperExec("on"), r == "on", systemSleepDisabled() {
+        nosleepSystemOn = true
+        // 写状态标记：进程被 SIGKILL 时，下次启动 recoverStaleNosleep 能据此复位 disablesleep
+        try? "system|\(Date().timeIntervalSince1970)|1"
+            .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
+        log("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）")
+    }
     let caff = Process()
     caff.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
     // -w 自身 pid：本进程一旦退出（哪怕被 SIGKILL），caffeinate 也会自动退出，
     // 杜绝残留的孤儿 caffeinate 继续持有「禁止显示器睡眠」断言。
-    caff.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
+    // auto-nosleep 时升级为 -dis：-s 阻止系统睡眠（仅 AC 有效，电池由 helper 覆盖）。
+    caff.arguments = [cfg.autoNosleep ? "-dis" : "-di",
+                      "-w", String(ProcessInfo.processInfo.processIdentifier)]
     try? caff.run()
 
     var restored = false
@@ -316,6 +681,11 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
         guard !restored else { return }
         restored = true
         pinTimer?.invalidate()
+        if nosleepSystemOn {
+            _ = helperExec("off"); nosleepSystemOn = false
+            try? fm.removeItem(atPath: nosleepStateFile)
+            log("nosleep: 已复位 disablesleep=0")
+        }
         log("恢复亮度 \(restoreTarget)，结束 caffeinate")
         restoreBrightness(restoreTarget)
         caff.terminate()
@@ -372,10 +742,12 @@ func runService(keyCode: Int64) -> Never {
         restoreBrightness(v)
     }
     try? fm.removeItem(atPath: stateFile)
+    recoverStaleNosleep()   // 上次异常退出遗留的 disablesleep 必须先复位
 
     var blacked = false
     var saved: Float = 0.5
     var caff: Process?
+    var nosleepSystemOn = false   // 关屏联动开启的系统级防睡眠（恢复时必须复位）
     var pinTimer: Timer?
     var timeoutTimer: Timer?     // 兜底：热键失效/被占用时也能自动恢复
     var battTimer: Timer?        // 黑屏期间的电量守卫
@@ -389,6 +761,11 @@ func runService(keyCode: Int64) -> Never {
         let target = cfg.restoreFixed ?? saved
         log("service 恢复显示 \(target)")
         restoreBrightness(target)
+        if nosleepSystemOn {
+            _ = helperExec("off"); nosleepSystemOn = false
+            try? fm.removeItem(atPath: nosleepStateFile)
+            log("nosleep: 已复位 disablesleep=0")
+        }
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: stateFile)
     }
@@ -422,10 +799,19 @@ func runService(keyCode: Int64) -> Never {
         if !setBrightness(0.0) { log("警告：首次设置亮度 0 失败") }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
-        c.arguments = ["-di", "-w", String(myPid)]
+        // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留。
+        // auto-nosleep 时升级为 -dis（-s 仅 AC 有效，电池与合盖由 helper 系统级开关覆盖）。
+        c.arguments = [cfg.autoNosleep ? "-dis" : "-di", "-w", String(myPid)]
         try? c.run()
         caff = c
+        if cfg.autoNosleep, helperInstalled(),
+           let r = helperExec("on"), r == "on", systemSleepDisabled() {
+            nosleepSystemOn = true
+            // 状态标记：本进程被 SIGKILL 时，recoverStaleNosleep 据此复位 disablesleep
+            try? "system|\(Date().timeIntervalSince1970)|1"
+                .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
+            log("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）")
+        }
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if blacked { setBrightness(0.0) }
         }
@@ -624,6 +1010,159 @@ case "service":
         print("用法: blankscreen service install | uninstall | status")
     }
 
+// MARK: - 防睡眠
+
+case "nosleep-daemon":
+    var wantSystem = false
+    var nsTimeout: TimeInterval? = nil
+    var i = 2
+    while i < args.count {
+        if args[i] == "--system" { wantSystem = true; i += 1 }
+        else if args[i] == "--timeout", i + 1 < args.count { nsTimeout = Double(args[i + 1]); i += 2 }
+        else { i += 1 }
+    }
+    runNosleepDaemon(timeout: nsTimeout, wantSystem: wantSystem)
+
+case "nosleep":
+    let sub = args.count > 2 ? args[2] : "status"
+    switch sub {
+    case "on":
+        recoverStaleNosleep()
+        if let pid = nosleepPid() {
+            print("防睡眠已在运行 pid=\(pid)（用 `blankscreen nosleep off` 关闭）")
+            exit(0)
+        }
+        var wantSystem = false
+        var nsTimeout: TimeInterval? = nil
+        var i = 3
+        while i < args.count {
+            if args[i] == "--system" { wantSystem = true; i += 1 }
+            else if args[i] == "--timeout", i + 1 < args.count { nsTimeout = Double(args[i + 1]); i += 2 }
+            else { i += 1 }
+        }
+        // 电量下限对防睡眠同样强制生效：合盖 + 电池 + 不睡是最容易耗尽电量的组合
+        let cfg = loadConfig()
+        if cfg.batteryFloor > 0 {
+            let b = batteryStatus()
+            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
+                let m = "电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消开启防睡眠（避免耗尽电池）"
+                FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
+                log(m); notify(m)
+                exit(1)
+            }
+        }
+        if wantSystem && !helperInstalled() {
+            print("提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。")
+            print("      本次按 Level 1 开启——仅在接电源时有效。")
+            print("      安装：`blankscreen nosleep install-helper`（会弹系统密码框）")
+            wantSystem = false
+        }
+        var a = ["nosleep-daemon"]
+        if wantSystem { a.append("--system") }
+        if let t = nsTimeout { a += ["--timeout", String(t)] }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exePath)
+        p.arguments = a
+        // 必须全部丢弃：继承父进程的管道会让父进程退出后子进程写失败
+        p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
+        do { try p.run() } catch {
+            FileHandle.standardError.write("启动防睡眠守护进程失败: \(error)\n".data(using: .utf8)!)
+            exit(1)
+        }
+        _ = waitUntil(timeout: 5.0) { nosleepPid() != nil }
+        if let pid = nosleepPid(), let info = nosleepInfo() {
+            print("防睡眠已开启 pid=\(pid)")
+            print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
+            let b = batteryStatus()
+            print("  电源: \(b.onBattery ? "电池 \(b.percent)%" : "电源适配器")")
+            if let t = nsTimeout { print("  时长: \(Int(t)) 秒后自动停止") }
+            print("  关闭: blankscreen nosleep off")
+        } else {
+            print("已启动但未确认，请查看 \(logPath)")
+            exit(1)
+        }
+
+    case "off":
+        guard let pid = nosleepPid() else {
+            // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
+            recoverStaleNosleep()
+            print("防睡眠未在运行")
+            exit(0)
+        }
+        try? fm.removeItem(atPath: nosleepStateFile)
+        kill(pid, SIGTERM)
+        let gone = waitUntil(timeout: 5.0) { nosleepPid() == nil }
+        print(gone ? "防睡眠已关闭" : "已发送停止指令（5s 内未确认，请查看 \(logPath)）")
+        if !gone { exit(1) }
+
+    case "status":
+        let b = batteryStatus()
+        let helper = helperInstalled()
+        print("防睡眠: \(nosleepPid() != nil ? "已开启" : "未开启")")
+        if let info = nosleepInfo() {
+            let mins = Int(Date().timeIntervalSince(info.since) / 60)
+            print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
+            print("  已持续: \(mins / 60) 小时 \(mins % 60) 分钟")
+        }
+        print("  电源: \(b.onBattery ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")" : "电源适配器")")
+        print("  提权助手: \(helper ? "已安装" : "未安装（电池 / 合盖防睡眠不可用）")")
+        if helper {
+            print("  系统级开关: \(systemSleepDisabled() ? "开启（系统不会睡眠）" : "关闭")")
+        }
+        if nosleepPid() == nil && helper && systemSleepDisabled() {
+            print("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位")
+        }
+
+    case "install-helper":
+        // --dry-run：把将要交给 root 执行的脚本完整打印出来供审计。
+        // 提权操作必须可被用户检视，这是此类工具可信度的基础。
+        if args.contains("--dry-run") {
+            print(installHelperScript(NSUserName()))
+            exit(0)
+        }
+        if helperInstalled() { print("提权助手已安装，无需重复操作"); exit(0) }
+        print("将安装一个仅允许「\(NSUserName())」以 root 执行 \(helperPath)")
+        print("（四个固定参数：on / off / status / detect）的授权条目。")
+        print("macOS 会弹出密码框，请输入你的登录密码。")
+        let (ok, out) = runAsAdmin(installHelperScript(NSUserName()))
+        print(ok ? "安装完成" : "安装失败: \(out)")
+        if ok {
+            if let d = helperExec("detect") { print("disablesleep 支持情况: \(d)") }
+            if !systemSleepDisabled() { print("当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）") }
+        }
+        exit(ok ? 0 : 1)
+
+    case "uninstall-helper":
+        if !helperInstalled() { print("提权助手未安装"); exit(0) }
+        // 先关掉正在运行的防睡眠，再卸载（顺序反了就再也无法复位）
+        if let pid = nosleepPid() { kill(pid, SIGTERM); _ = waitUntil(timeout: 5.0) { nosleepPid() == nil } }
+        let (ok, out) = runAsAdmin(uninstallHelperScript())
+        try? fm.removeItem(atPath: nosleepPidFile)
+        try? fm.removeItem(atPath: nosleepStateFile)
+        print(ok ? "已卸载提权助手，并已复位系统睡眠设置" : "卸载失败: \(out)")
+        exit(ok ? 0 : 1)
+
+    case "write-assets":
+        // 把内嵌资产导出到目录，供人工审计与 CI 一致性校验
+        let dir = args.count > 3 ? args[3] : "."
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        do {
+            try helperScript.write(toFile: dir + "/com.blankscreen.pmset", atomically: true, encoding: .utf8)
+            try resetPlist.write(toFile: dir + "/com.blankscreen.nosleep.reset.plist", atomically: true, encoding: .utf8)
+            print("已写出资产到 \(dir)")
+        } catch { print("写出失败: \(error)"); exit(1) }
+
+    default:
+        print("""
+        用法: blankscreen nosleep <子命令>
+          on [--system] [--timeout 秒]   开启防睡眠（--system 覆盖电池与合盖，需先装助手）
+          off                           关闭防睡眠，并复位系统级设置
+          status                        查看层级、电量、助手安装状态
+          install-helper                安装提权助手（弹系统密码框，仅授权单个脚本）
+          uninstall-helper              卸载助手并复位系统睡眠设置
+        """)
+    }
+
 case "config":
     var c = loadConfig()
     var i = 2
@@ -655,6 +1194,8 @@ case "config":
             }
             i += 2
         }
+        else if args[i] == "--auto-nosleep" { c.autoNosleep = true; i += 1 }
+        else if args[i] == "--no-auto-nosleep" { c.autoNosleep = false; i += 1 }
         else if args[i] == "--reset" { c = Config(); i += 1 }
         else { i += 1 }
     }
@@ -675,7 +1216,8 @@ case "config":
     print("  一次性模式超时: \(Int(c.timeout)) 秒（\(String(format: "%.1f", c.timeout / 3600)) 小时，0 = 不限）")
     print("  恢复亮度: \(c.restoreFixed.map { String(format: "固定 %.0f%%", $0 * 100) } ?? "进入黑屏前的亮度")")
     print("  电量下限: \(c.batteryFloor > 0 ? "\(c.batteryFloor)%（电池供电且放电时，低于此值拒绝关屏并自动恢复）" : "不限制")")
-    print("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original")
+    print("  关屏联动防睡眠: \(c.autoNosleep ? "开（黑屏期间阻止系统睡眠，恢复显示时自动复位）" : "关")")
+    print("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep")
 
 case "off":
     if let pid = servicePid() {                      // 常驻模式：命令文件 + 信号双通道
@@ -771,6 +1313,18 @@ default:
       blankscreen bright [0.0-1.0]           直接读写亮度
 
       不用常驻服务时: blankscreen off [--timeout 秒] [--no-timeout]
+
+    防睡眠（阻止系统睡眠，与关屏相互独立）:
+      blankscreen nosleep on                 开启（进程级：仅在接电源时有效）
+      blankscreen nosleep on --system        开启（系统级：覆盖电池供电与合盖，需助手）
+      blankscreen nosleep on --timeout 3600  指定时长后自动停止
+      blankscreen nosleep off / status       关闭 / 查看层级、电量、助手状态
+      blankscreen nosleep install-helper     安装提权助手（弹系统密码框）
+      blankscreen nosleep uninstall-helper   卸载助手并复位系统睡眠设置
+
+    为什么系统级需要助手: caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，
+    所以电池供电与合盖这两种场景，进程级断言无解，只能用 pmset disablesleep（需 root）。
+    助手只授权单个 root:wheel 脚本的四个固定参数，且默认不安装。
 
     默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
     热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。

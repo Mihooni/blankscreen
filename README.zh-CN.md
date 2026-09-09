@@ -84,6 +84,7 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # 验证构
 **菜单栏**：点击 ☀ / 🌙 图标
 
 - 关闭显示器 / 恢复显示
+- 防睡眠 —— 黑屏 / 合盖期间阻止系统睡眠（见[防睡眠](#防睡眠合盖--电池--无显示器时不睡眠)）
 - 设置… —— 热键组合与按键、兜底超时、电量保护、恢复亮度策略、登录时自动启动
 - 热键自检 —— 自动合成一次热键验证整条链路（无副作用，不会开关屏幕）
 - 打开日志
@@ -99,9 +100,38 @@ blankscreen bright 0.5             # 直接读写系统亮度
 blankscreen service install        # 以 launchd 服务常驻（不用菜单栏 App 时）
 blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
 blankscreen config --battery 20    # 电量下限 %：低于则拒绝/退出黑屏（0 = 不限制）
+blankscreen config --auto-nosleep  # 关屏时自动联动防睡眠，恢复显示时自动复位
 ```
 
 默认热键 **⌃⌥⌘B**。可在设置面板或 `blankscreen config` 修改。组合必须带至少一个修饰键（⌘/⌃/⌥/⇧）——macOS 不允许无修饰键的全局热键。
+
+## 防睡眠（合盖 / 电池 / 无显示器时不睡眠）
+
+黑屏只关背光，系统本身仍会按设置睡眠。如果需要黑屏期间机器持续工作（远程访问、下载、合盖外接使用），可以开启防睡眠：
+
+```bash
+blankscreen nosleep on                     # 进程级（caffeinate，仅接电源时有效）
+blankscreen nosleep on --system            # 系统级（覆盖电池与合盖，需先装提权助手）
+blankscreen nosleep on --timeout 3600      # 定时自动停止
+blankscreen nosleep status                 # 查看层级 / 电源 / 已持续时间
+blankscreen nosleep off                    # 停止并复位
+```
+
+**为什么系统级需要提权助手？** `caffeinate -s` 的断言按 man page 明写「仅 AC 电源有效」；要覆盖电池与合盖，只能调用 `pmset disablesleep`，而它必须以 root 运行。安装助手（一次性，需输入管理员密码）：
+
+```bash
+sudo blankscreen nosleep install-helper    # 最小权限：sudoers 限定仅本工具、仅四个白名单参数
+blankscreen nosleep detect                 # 查看当前系统对 disablesleep 的支持情况
+sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
+```
+
+安全设计：
+
+- 助手是参数白名单脚本，只能执行 `on` / `off` / `status` / `detect`，无法被借道执行任意命令
+- sudoers 仅授权单用户、以 root 身份、精确匹配四个参数
+- 卸载时先复位 `disablesleep 0` 再删助手，杜绝「系统永不睡眠」残留
+- 开机 LaunchDaemon + 每次启动的自愈检查双保险：任何异常退出都会自动复位
+- 电量下限对防睡眠同样生效——合盖 + 电池 + 不睡眠是最容易耗尽电池的组合
 
 ## 卸载
 

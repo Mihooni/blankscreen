@@ -21,3 +21,4 @@ blctl
 .DS_Store
 *.swp
 *~
+.build/

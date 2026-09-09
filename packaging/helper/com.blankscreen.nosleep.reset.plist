@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.blankscreen.nosleep.reset —— 开机时把 disablesleep 复位为 0。
+
+  为什么必须有它：
+  pmset disablesleep 是**持久**的全局设置，写入后即使进程被 SIGKILL 也仍然生效。
+  这意味着崩溃、强退、卸载都可能把系统留在「永不睡眠」状态，且用户无从察觉
+  （这正是本机 Amphetamine 留下的教训：SleepDisabled=1 且已连续 7 天未睡眠）。
+
+  本 LaunchDaemon 只在开机瞬间执行一次（KeepAlive=false，跑完即退），
+  保证每次启动都从干净状态开始；随后由用户显式开启防睡眠。
+  它不是常驻 root 进程，攻击面极小。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.blankscreen.nosleep.reset</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/pmset</string>
+        <string>disablesleep</string>
+        <string>0</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

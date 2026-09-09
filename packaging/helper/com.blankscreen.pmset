@@ -1,0 +1,61 @@
+#!/bin/sh
+# com.blankscreen.pmset —— 以 root 执行的极窄权限助手
+#
+# 存在的唯一理由：caffeinate -s 的断言仅在 AC 电源下有效（见 man caffeinate），
+# 因此「电池供电」与「合盖」两种防睡眠场景无法用进程级断言实现，
+# 只能求助于 pmset disablesleep 这个全局开关，而它需要 root。
+#
+# 安全约束（任意一条被破坏都必须视为漏洞）：
+#   1. 本文件必须是 root:wheel 且权限 0755，目录 /Library/PrivilegedHelperTools
+#      同样为 root:wheel —— 普通用户无法改写脚本内容。
+#   2. sudoers 中精确列出「单用户 + (root) + 每个参数各一条」，不接受通配。
+#   3. 只接受 on / off / status / detect 四个字面量，其他一律 exit 2。
+#      任何外部输入都不参与 shell 求值，避免参数注入。
+#   4. 绝不接受路径或数值参数，杜绝 `pmset` 被借去改别的设置。
+
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+PMS=/usr/bin/pmset
+LOG_TAG=com.blankscreen.pmset
+
+usage() {
+    echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
+    exit 2
+}
+
+[ $# -eq 1 ] || usage
+
+case "$1" in
+    on)
+        # disablesleep 未文档化：在部分系统上可能已被移除。
+        # 失败必须让调用方看得见（非 0 退出码），不能静默。
+        if ! "$PMS" disablesleep 1 2>/dev/null; then
+            echo "$LOG_TAG: 'pmset disablesleep 1' 失败（该选项可能已被移除）" >&2
+            exit 1
+        fi
+        echo "on"
+        ;;
+    off)
+        "$PMS" disablesleep 0 >/dev/null 2>&1
+        echo "off"
+        ;;
+    status)
+        v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+        echo "${v:-0}"
+        ;;
+    detect)
+        # 探测 disablesleep 是否仍受支持：写 0 并看能否成功、读回是否一致。
+        # 这是「未文档化 API 随时可能消失」的显式降级检查。
+        if "$PMS" disablesleep 0 >/dev/null 2>&1; then
+            v=$("$PMS" -g 2>/dev/null | awk '/SleepDisabled/{print $2}')
+            echo "supported:${v:-0}"
+        else
+            echo "unsupported"
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac

@@ -21,6 +21,11 @@ let serviceFile = base + "/service.pid"
 let configFile = base + "/config.json"
 let logPath = base + "/blankscreen.log"
 let commandFile = base + "/command"        // CLI -> App 的指令(off/on/toggle)，比信号可靠
+
+// 防睡眠 Level 2（覆盖电池与合盖）所需。caffeinate -s 按 man page 明写「仅 AC 有效」，
+// 所以电池与合盖只能靠 pmset disablesleep，而它需要 root。
+let helperPath = "/Library/PrivilegedHelperTools/com.blankscreen.pmset"
+let sudoersPath = "/etc/sudoers.d/blankscreen"
 // 关屏被拒绝（电量过低 / 亮度接口不可用）时的回传：CLI off 读完即清
 let rejectFile = base + "/reject"
 let barPlist = home + "/Library/LaunchAgents/com.blankscreen.bar.plist"
@@ -81,8 +86,9 @@ struct Config: Codable {
     var timeout: Double = 43200              // 黑屏后自动恢复兜底，秒；0 = 不启用
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
+    var autoNosleep: Bool = false            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -91,6 +97,7 @@ struct Config: Codable {
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
+        autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
     }
 }
 let MOD_CTRL: UInt64  = 1 << 18
@@ -275,6 +282,91 @@ final class ScreenController {
     var selfTesting = false
     var onStateChange: (() -> Void)?
 
+    // MARK: 防睡眠
+    //
+    // 与关屏是两件事：关屏只让背光熄灭，防睡眠是阻止系统进入睡眠。
+    // caffeinate -s 的断言仅 AC 有效（man page 明写），所以电池与合盖场景
+    // 必须靠 pmset disablesleep（需 root、默认不安装）。
+    var nosleepCaff: Process?
+    var nosleepSystemOn = false
+    var nosleepOn = false
+    var nosleepAuto = false            // 由「关屏联动」开启时为 true，恢复显示时随之关闭
+
+    func helperInstalled() -> Bool {
+        fm.isExecutableFile(atPath: helperPath) &&
+        (try? String(contentsOfFile: sudoersPath, encoding: .utf8)) != nil
+    }
+
+    private func helperExec(_ arg: String) -> String? {
+        guard ["on", "off", "status"].contains(arg), helperInstalled() else { return nil }
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        p.arguments = ["-n", helperPath, arg]
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = nil
+        do { try p.run() } catch { return nil }
+        // 必须先读再等：管道缓冲区写满会让子进程卡死在 write 上
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func systemSleepDisabled() -> Bool {
+        guard let s = helperExec("status"), let v = Int(s) else { return false }
+        return v == 1
+    }
+
+    var nosleepLevelText: String {
+        guard nosleepOn else { return "未开启" }
+        return nosleepSystemOn ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）"
+    }
+
+    /// 黑屏期间持有 caffeinate，阻止空闲/显示器睡眠（-w 保证退出即回收）
+    private func startCaff() {
+        guard caff == nil else { return }
+        let c = Process()
+        c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        c.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
+        try? c.run()
+        caff = c
+    }
+
+    @discardableResult
+    func startNosleep(auto: Bool = false) -> Bool {
+        guard !nosleepOn else { return true }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let c = Process()
+        c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        c.arguments = ["-dis", "-w", String(pid)]
+        try? c.run()
+        nosleepCaff = c
+        nosleepOn = true
+        // -dis 已覆盖 -d -i，不必再单独持有黑屏用的 caffeinate
+        caff?.terminate(); caff = nil
+
+        if helperInstalled(), let r = helperExec("on"), r == "on", systemSleepDisabled() {
+            nosleepSystemOn = true
+            blog("bar: 防睡眠开启（系统级，覆盖电池与合盖）")
+        } else {
+            nosleepSystemOn = false
+            blog("bar: 防睡眠开启（进程级，仅电源适配器时有效）")
+        }
+        nosleepAuto = auto
+        scheduleBatteryGuard()
+        onStateChange?()
+        return true
+    }
+
+    /// 系统级开关是持久的，停止时必须显式复位，否则系统再也不会睡眠
+    func stopNosleep(_ reason: String = "手动关闭") {
+        guard nosleepOn else { return }
+        if nosleepSystemOn { _ = helperExec("off"); nosleepSystemOn = false }
+        nosleepCaff?.terminate(); nosleepCaff = nil
+        nosleepOn = false
+        nosleepAuto = false
+        if blacked { startCaff() }      // 仍在黑屏则恢复黑屏所需的断言
+        blog("bar: 防睡眠停止（\(reason)）")
+        onStateChange?()
+    }
+
     // MARK: 状态
     var isBlacked: Bool { fm.fileExists(atPath: stateFile) }
 
@@ -307,12 +399,7 @@ final class ScreenController {
         try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
         blacked = true
         if !setBrightness(0.0) { blog("bar: 警告：首次设置亮度 0 失败") }
-        let c = Process()
-        c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留
-        c.arguments = ["-di", "-w", String(ProcessInfo.processInfo.processIdentifier)]
-        try? c.run()
-        caff = c
+        startCaff()
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             if self?.blacked == true { setBrightness(0.0) }
         }
@@ -320,6 +407,8 @@ final class ScreenController {
         pinTimer = t
         scheduleTimeout()
         scheduleBatteryGuard()
+        // 关屏与防睡眠联动：这是「屏幕黑着但机器保持可远程」的完整场景
+        if cfg.autoNosleep { startNosleep(auto: true) }
         blog("bar: 进入黑屏，原亮度 \(saved)，电量下限 \(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : "不限")")
         onStateChange?()
         return true
@@ -327,17 +416,20 @@ final class ScreenController {
 
     // 黑屏期间每 30s 复查电量，跌破下限立即恢复；这是硬保护，
     // 即使用户想保持黑屏也不放行——耗尽电池的代价比「被打断」大得多
+    /// 电量守卫同时覆盖黑屏与防睡眠：合盖 + 电池 + 不睡眠是最容易耗尽电量的组合，
+    /// 机器在包里持续发热直到没电，用户却毫不知情。
     func scheduleBatteryGuard() {
         battTimer?.invalidate(); battTimer = nil
         guard cfg.batteryFloor > 0 else { return }
         let t = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self = self, self.blacked else { return }
+            guard let self = self, self.blacked || self.nosleepOn else { return }
             let b = batteryStatus()
             guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else { return }
-            let m = "电量 \(b.percent)% 已达下限 \(self.cfg.batteryFloor)%，自动恢复显示"
+            let m = "电量 \(b.percent)% 已达下限 \(self.cfg.batteryFloor)%，自动恢复"
             blog("bar: \(m)")
             notifyUser(m)
-            self.restore()
+            self.stopNosleep("电量已达下限 \(self.cfg.batteryFloor)%")
+            if self.blacked { self.restore() }
         }
         RunLoop.main.add(t, forMode: .common)
         battTimer = t
@@ -349,6 +441,8 @@ final class ScreenController {
         pinTimer?.invalidate(); pinTimer = nil
         timeoutTimer?.invalidate(); timeoutTimer = nil
         battTimer?.invalidate(); battTimer = nil
+        // 联动开启的防睡眠随黑屏一起结束；用户手动开启的保持不动
+        if nosleepAuto { stopNosleep("已恢复显示") }
         let target = cfg.restoreFixed ?? saved
         blog("bar: 恢复显示 \(target)")
         restoreBrightness(target)
@@ -549,6 +643,8 @@ final class ScreenController {
 
     func shutdown() {
         restore()
+        // 系统级开关是持久的：退出前必须复位，否则退出后系统再也不会睡眠
+        stopNosleep("程序退出")
         try? fm.removeItem(atPath: serviceFile)
         blog("bar: 退出")
         exit(0)
@@ -567,6 +663,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var timeoutPop: NSPopUpButton!
     private var batteryPop: NSPopUpButton!
     private var restorePop: NSPopUpButton!
+    private var nosleepBtn: NSButton!
+    private var helperLabel: NSTextField!
+    private var helperBtn: NSButton!
     private var restoreSlider: NSSlider!
     private var restoreValueLabel: NSTextField!
     private var loginBtn: NSButton!
@@ -651,6 +750,18 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         let battTip = wrapLabel("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。")
         root.addArrangedSubview(battTip)
 
+        // —— 防睡眠
+        root.addArrangedSubview(section("防睡眠（阻止系统睡眠）"))
+        nosleepBtn = NSButton(checkboxWithTitle: "关屏时同时阻止系统睡眠", target: self, action: #selector(onNosleepToggled(_:)))
+        root.addArrangedSubview(nosleepBtn)
+
+        let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
+        helperBtn = NSButton(title: "安装提权助手…", target: self, action: #selector(onInstallHelper(_:)))
+        helperRow.addArrangedSubview(helperBtn)
+        root.addArrangedSubview(helperRow)
+        helperLabel = wrapLabel("")
+        root.addArrangedSubview(helperLabel)
+
         // —— 恢复亮度
         root.addArrangedSubview(section("恢复后的亮度"))
         restorePop = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -730,7 +841,63 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         restoreSlider.doubleValue = Double((fixed ?? 0.5) * 100)
         restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
         loginBtn.state = isLoginItemEnabled() ? .on : .off
+        syncNosleep()
         refreshPerm()
+    }
+
+    /// 防睡眠与提权助手状态。助手是「系统级防睡眠」的前提，必须让用户看得见当前能力边界。
+    private func syncNosleep() {
+        nosleepBtn.state = cfg.autoNosleep ? .on : .off
+        if ctl.helperInstalled() {
+            helperBtn.title = "卸载提权助手"
+            helperLabel.stringValue = "提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。" +
+                "（仅授权单个 root:wheel 脚本的四个固定参数）"
+        } else {
+            helperBtn.title = "安装提权助手…"
+            helperLabel.stringValue = "提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，" +
+                "电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。"
+        }
+        helperLabel.needsLayout = true
+    }
+
+    @objc private func onNosleepToggled(_ sender: Any?) {
+        cfg.autoNosleep = (nosleepBtn.state == .on)
+        ctl.cfg = cfg
+        commit()
+        // 已处于黑屏时立即生效，不必等下次关屏
+        if cfg.autoNosleep && ctl.blacked { ctl.startNosleep(auto: true) }
+    }
+
+    /// 调用 CLI 完成提权安装：密码框由系统弹出，App 不接触凭据
+    @objc private func onInstallHelper(_ sender: Any?) {
+        let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+        guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
+            let a = NSAlert(); a.messageText = "未找到命令行工具"
+            a.informativeText = "请先在终端安装 blankscreen，或手动执行：\nblankscreen nosleep install-helper"
+            a.runModal(); return
+        }
+        let uninstall = ctl.helperInstalled()
+        helperBtn.isEnabled = false
+        // 密码框会阻塞，必须放到后台线程；否则设置面板会卡住直到用户输入完成
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: cli)
+            p.arguments = ["nosleep", uninstall ? "uninstall-helper" : "install-helper"]
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+            var out = ""
+            if (try? p.run()) != nil {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                out = String(data: data, encoding: .utf8) ?? ""
+            } else { out = "无法启动 \(cli)" }
+            DispatchQueue.main.async {
+                self.helperBtn.isEnabled = true
+                self.syncNosleep()
+                let a = NSAlert()
+                a.messageText = uninstall ? "卸载提权助手" : "安装提权助手"
+                a.informativeText = out.isEmpty ? "已完成（无输出）" : out
+                a.runModal()
+            }
+        }
     }
     private func refreshPerm() {
         let c = ctl.cfg
@@ -841,6 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
+    private var nosleepItem: NSMenuItem!
     private var stateItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var permItem: NSMenuItem!
@@ -906,6 +1074,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem = NSMenuItem(title: "关闭显示器", action: #selector(toggle(_:)), keyEquivalent: "")
         toggleItem.target = self
         m.addItem(toggleItem)
+        nosleepItem = NSMenuItem(title: "防睡眠", action: #selector(toggleNosleep(_:)), keyEquivalent: "")
+        nosleepItem.target = self
+        m.addItem(nosleepItem)
         m.addItem(.separator())
         let set = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
         set.target = self; m.addItem(set)
@@ -934,6 +1105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             : "BlankScreen —— 快捷键 \(hotkeyText(ctl.cfg))，点击打开菜单"
         stateItem.title = blacked ? "● 显示器已关闭（系统保持唤醒）" : "○ 显示正常"
         toggleItem.title = blacked ? "恢复显示  \(hotkeyText(ctl.cfg))" : "关闭显示器  \(hotkeyText(ctl.cfg))"
+        nosleepItem.state = ctl.nosleepOn ? .on : .off
+        nosleepItem.title = ctl.nosleepOn
+            ? "防睡眠（\(ctl.nosleepLevelText)）"
+            : "防睡眠 —— 阻止系统睡眠"
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
             permItem.title = "⚠️ 快捷键未生效 —— 点击排查"
@@ -961,6 +1136,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 菜单弹出前刷新状态（menuWillOpen 已负责重试热键监听）
     @objc func menuNeedsUpdate(_ menu: NSMenu) { refreshUI() }
     @objc private func toggle(_ sender: Any?) { ctl.toggle() }
+
+    @objc private func toggleNosleep(_ sender: Any?) {
+        if ctl.nosleepOn {
+            ctl.stopNosleep("菜单关闭")
+        } else {
+            ctl.startNosleep(auto: false)
+            // 降级必须说清楚：否则用户会以为合盖也不睡了，结果放进包里睡死
+            if !ctl.nosleepSystemOn {
+                notifyUser("防睡眠已开启（进程级）：仅在本机接电源时有效。" +
+                           "要覆盖电池与合盖，请在「设置」里安装提权助手。")
+            }
+        }
+        refreshUI()
+    }
+
     @objc private func openSettings(_ sender: Any?) {
         if settings == nil { settings = SettingsPanel() }
         settings?.show()
