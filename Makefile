@@ -35,6 +35,8 @@ all: cli app
 # 把版本写进二进制与 App 的 Info.plist（`blankscreen version` / 关于面板会显示）
 .PHONY: version-file
 version-file:
+	@# Version.swift 是构建产物（已 gitignore），目录可能不存在于干净的 checkout 中
+	@mkdir -p Sources/Shared
 	@printf '// 由 Makefile 生成，请勿手改\nlet BS_VERSION = "%s"\nlet BS_COMMIT = "%s"\n' \
 		"$(VERSION)" "$(COMMIT)" > Sources/Shared/Version.swift
 	@sed -i '' 's|<string>[0-9.]*</string><!--VERSION-->|<string>$(VERSION)</string><!--VERSION-->|' Sources/Info.plist 2>/dev/null || true
