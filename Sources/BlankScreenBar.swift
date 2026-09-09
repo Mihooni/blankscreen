@@ -293,8 +293,8 @@ final class ScreenController {
     var nosleepAuto = false            // 由「关屏联动」开启时为 true，恢复显示时随之关闭
 
     func helperInstalled() -> Bool {
-        fm.isExecutableFile(atPath: helperPath) &&
-        (try? String(contentsOfFile: sudoersPath, encoding: .utf8)) != nil
+        // sudoers 只判存在、不能读内容：0440 root:wheel 对普通用户不可读，读会误判未安装
+        fm.isExecutableFile(atPath: helperPath) && fm.fileExists(atPath: sudoersPath)
     }
 
     private func helperExec(_ arg: String) -> String? {
@@ -1009,6 +1009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
     private var nosleepItem: NSMenuItem!
+    private var setupItem: NSMenuItem!
     private var stateItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var permItem: NSMenuItem!
@@ -1077,6 +1078,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nosleepItem = NSMenuItem(title: "防睡眠", action: #selector(toggleNosleep(_:)), keyEquivalent: "")
         nosleepItem.target = self
         m.addItem(nosleepItem)
+        // 一键到位：装助手 + 开关屏联动 + 立即防睡眠。助手装好后此入口隐藏（设置面板仍可卸载）。
+        setupItem = NSMenuItem(title: "一键防睡眠（安装提权助手…）", action: #selector(runSetup(_:)), keyEquivalent: "")
+        setupItem.target = self
+        m.addItem(setupItem)
         m.addItem(.separator())
         let set = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
         set.target = self; m.addItem(set)
@@ -1109,6 +1114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nosleepItem.title = ctl.nosleepOn
             ? "防睡眠（\(ctl.nosleepLevelText)）"
             : "防睡眠 —— 阻止系统睡眠"
+        setupItem.isHidden = ctl.helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
             permItem.title = "⚠️ 快捷键未生效 —— 点击排查"
@@ -1126,6 +1132,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshUI()
     }
     func menuWillOpen(_ menu: NSMenu) { ensureHotkey() }
+
+    /// 一键防睡眠：调 CLI `nosleep setup`（装助手弹系统密码框 + 开联动 + 立即防睡眠）
+    @objc private func runSetup(_ sender: Any?) {
+        let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+        guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
+            let a = NSAlert(); a.messageText = "未找到命令行工具"
+            a.informativeText = "请先安装 blankscreen 命令行工具（.pkg 安装包已包含）。"
+            a.runModal(); return
+        }
+        setupItem.isEnabled = false
+        // 密码框会阻塞，必须放后台线程，否则菜单会卡住直到用户输入完成
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: cli)
+            p.arguments = ["nosleep", "setup"]
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+            var out = ""
+            if (try? p.run()) != nil {
+                out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                p.waitUntilExit()
+            } else { out = "无法启动 \(cli)" }
+            DispatchQueue.main.async {
+                self.setupItem.isEnabled = true
+                self.refreshUI()
+                let a = NSAlert()
+                a.messageText = "一键防睡眠"
+                a.informativeText = out.isEmpty ? "已完成" : out
+                a.runModal()
+            }
+        }
+    }
 
     static func dumpView(_ v: NSView, depth: Int) {
         let pad = String(repeating: "  ", count: depth)

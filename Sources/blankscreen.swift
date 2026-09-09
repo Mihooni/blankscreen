@@ -220,10 +220,11 @@ func notify(_ msg: String) {
 //   * 开机强制复位：disablesleep 是持久全局设置，崩溃/卸载后若不复位会把系统
 //     永久留在「永不睡眠」状态（本机 Amphetamine 就是活证据：SleepDisabled=1、7 天未睡眠）
 
-/// 三个条件齐全才算已安装。只查文件会出现「装了一半」却静默降级的情况。
+/// 两个文件齐全才算已安装。只查文件会出现「装了一半」却静默降级的情况。
+/// 注意 sudoers 只判存在、不能读内容：0440 root:wheel 对普通用户不可读，读会误判未安装。
 func helperInstalled() -> Bool {
     guard fm.isExecutableFile(atPath: helperPath),
-          (try? String(contentsOfFile: sudoersPath, encoding: .utf8)) != nil else { return false }
+          fm.fileExists(atPath: sudoersPath) else { return false }
     return true
 }
 
@@ -542,9 +543,27 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     runAppLoop()
 }
 
+/// fork 自身启动 nosleep-daemon 并等待确认（stdio 必须全部丢弃，
+/// 否则继承父进程管道会让父进程退出后子进程写失败）。
+func spawnNosleepDaemon(wantSystem: Bool, timeout: TimeInterval?) -> (pid: Int32, info: NosleepInfo)? {
+    var a = ["nosleep-daemon"]
+    if wantSystem { a.append("--system") }
+    if let t = timeout { a += ["--timeout", String(t)] }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exePath)
+    p.arguments = a
+    p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
+    do { try p.run() } catch {
+        FileHandle.standardError.write("启动防睡眠守护进程失败: \(error)\n".data(using: .utf8)!)
+        return nil
+    }
+    _ = waitUntil(timeout: 5.0) { nosleepPid() != nil }
+    if let pid = nosleepPid(), let info = nosleepInfo() { return (pid, info) }
+    return nil
+}
+
 // 常用键位名（仅用于展示）
-let keyTable: [(String, Int64)] = [
-    ("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
+let keyTable: [(String, Int64)] = [    ("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
     ("I", 34), ("J", 38), ("K", 40), ("L", 37), ("M", 46), ("N", 45), ("O", 31), ("P", 35),
     ("Q", 12), ("R", 15), ("S", 1), ("T", 17), ("U", 32), ("V", 9), ("W", 13), ("X", 7),
     ("Y", 16), ("Z", 6), ("F13", 105), ("Space", 49)
@@ -1054,23 +1073,10 @@ case "nosleep":
         if wantSystem && !helperInstalled() {
             print("提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。")
             print("      本次按 Level 1 开启——仅在接电源时有效。")
-            print("      安装：`blankscreen nosleep install-helper`（会弹系统密码框）")
+            print("      一键安装：`blankscreen nosleep setup`（会弹系统密码框）")
             wantSystem = false
         }
-        var a = ["nosleep-daemon"]
-        if wantSystem { a.append("--system") }
-        if let t = nsTimeout { a += ["--timeout", String(t)] }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exePath)
-        p.arguments = a
-        // 必须全部丢弃：继承父进程的管道会让父进程退出后子进程写失败
-        p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
-        do { try p.run() } catch {
-            FileHandle.standardError.write("启动防睡眠守护进程失败: \(error)\n".data(using: .utf8)!)
-            exit(1)
-        }
-        _ = waitUntil(timeout: 5.0) { nosleepPid() != nil }
-        if let pid = nosleepPid(), let info = nosleepInfo() {
+        if let (pid, info) = spawnNosleepDaemon(wantSystem: wantSystem, timeout: nsTimeout) {
             print("防睡眠已开启 pid=\(pid)")
             print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
             let b = batteryStatus()
@@ -1081,6 +1087,53 @@ case "nosleep":
             print("已启动但未确认，请查看 \(logPath)")
             exit(1)
         }
+
+    case "setup":
+        // 一键到位：装助手 → 开关屏联动 → 立即开启系统级防睡眠。每一步幂等，可重复执行。
+        print("BlankScreen 一键防睡眠")
+        if helperInstalled() {
+            print("① 提权助手已安装，跳过")
+        } else {
+            print("① 安装提权助手（macOS 将弹出密码框）…")
+            let (ok, out) = runAsAdmin(installHelperScript(NSUserName()))
+            guard ok else {
+                print("   安装失败: \(out)")
+                print("   提示：取消密码框会中止安装，可重新运行本命令。")
+                exit(1)
+            }
+            print("   完成（电池与合盖现已可防睡眠）")
+        }
+        var sc = loadConfig()
+        if sc.autoNosleep {
+            print("② 关屏联动防睡眠：已开启")
+        } else {
+            sc.autoNosleep = true
+            saveConfig(sc)
+            print("② 已开启「关屏时联动防睡眠」，恢复显示时自动复位")
+        }
+        if servicePid() != nil {
+            print("③ 常驻服务运行中：防睡眠将随黑屏自动联动，也可在菜单栏单独开关")
+        } else if nosleepPid() != nil {
+            print("③ 防睡眠守护已在运行")
+        } else {
+            var skipForBattery = false
+            if sc.batteryFloor > 0 {
+                let b = batteryStatus()
+                skipForBattery = b.onBattery && b.discharging && b.percent <= sc.batteryFloor
+                if skipForBattery {
+                    print("③ 电量 \(b.percent)% 低于下限 \(sc.batteryFloor)%，跳过立即开启（黑屏联动在接电后仍会生效）")
+                }
+            }
+            if !skipForBattery {
+                print("③ 立即开启系统级防睡眠…")
+                if let (pid, info) = spawnNosleepDaemon(wantSystem: true, timeout: nil) {
+                    print("   已开启 pid=\(pid)，层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
+                } else {
+                    print("   启动未确认，请查看 \(logPath)")
+                }
+            }
+        }
+        print("✅ 一键配置完成。查看状态: blankscreen nosleep status")
 
     case "off":
         guard let pid = nosleepPid() else {
@@ -1112,6 +1165,11 @@ case "nosleep":
         if nosleepPid() == nil && helper && systemSleepDisabled() {
             print("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位")
         }
+
+    case "detect":
+        // 只读探测，不改任何状态
+        guard helperInstalled() else { print("提权助手未安装"); exit(1) }
+        print(helperExec("detect") ?? "探测失败（sudo 免密授权可能失效，重新安装助手可修复）")
 
     case "install-helper":
         // --dry-run：把将要交给 root 执行的脚本完整打印出来供审计。
@@ -1155,6 +1213,7 @@ case "nosleep":
     default:
         print("""
         用法: blankscreen nosleep <子命令>
+          setup                         一键到位：装助手 + 开关屏联动 + 立即防睡眠
           on [--system] [--timeout 秒]   开启防睡眠（--system 覆盖电池与合盖，需先装助手）
           off                           关闭防睡眠，并复位系统级设置
           status                        查看层级、电量、助手安装状态

@@ -115,12 +115,15 @@ Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscr
 Blackout only kills the backlight — the system itself still sleeps on schedule. If the machine must keep working while blacked out (remote access, downloads, closed-clamshell use), enable anti-sleep:
 
 ```bash
+blankscreen nosleep setup                  # one command: install helper + blackout linkage + start anti-sleep
 blankscreen nosleep on                     # process-level (caffeinate; effective on AC power only)
 blankscreen nosleep on --system            # system-level (covers battery + lid; requires the helper)
 blankscreen nosleep on --timeout 3600      # auto-stop after a duration
 blankscreen nosleep status                 # level / power source / uptime
 blankscreen nosleep off                    # stop and reset
 ```
+
+The menu bar app offers the same one-click entry ("一键防睡眠") when the helper is not installed yet.
 
 **Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
 

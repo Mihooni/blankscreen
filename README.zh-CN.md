@@ -110,12 +110,15 @@ blankscreen config --auto-nosleep  # 关屏时自动联动防睡眠，恢复显�
 黑屏只关背光，系统本身仍会按设置睡眠。如果需要黑屏期间机器持续工作（远程访问、下载、合盖外接使用），可以开启防睡眠：
 
 ```bash
+blankscreen nosleep setup                  # 一键到位：装助手 + 开关屏联动 + 立即防睡眠
 blankscreen nosleep on                     # 进程级（caffeinate，仅接电源时有效）
 blankscreen nosleep on --system            # 系统级（覆盖电池与合盖，需先装提权助手）
 blankscreen nosleep on --timeout 3600      # 定时自动停止
 blankscreen nosleep status                 # 查看层级 / 电源 / 已持续时间
 blankscreen nosleep off                    # 停止并复位
 ```
+
+菜单栏 App 同样提供「一键防睡眠」入口（助手未安装时显示）。
 
 **为什么系统级需要提权助手？** `caffeinate -s` 的断言按 man page 明写「仅 AC 电源有效」；要覆盖电池与合盖，只能调用 `pmset disablesleep`，而它必须以 root 运行。安装助手（一次性，需输入管理员密码）：
 
