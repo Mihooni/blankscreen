@@ -699,7 +699,7 @@ final class ScreenController {
                 if lidDaemonPid() == nil { _ = setLidAwake(true) }
             } else {
                 var c = loadConfig(); c.lidAwake = false; saveConfig(c); cfg = c
-                notifyUser("合盖不睡眠已停用：提权助手未安装（可能已被卸载）")
+                notifyUser("「合盖后不睡眠」已停用：提权助手未安装（可能已被卸载）")
             }
         }
 
@@ -913,9 +913,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
 
         // —— 防睡眠
         root.addArrangedSubview(section("防睡眠（阻止系统睡眠）"))
-        nosleepBtn = NSButton(checkboxWithTitle: "关屏时同时阻止系统睡眠", target: self, action: #selector(onNosleepToggled(_:)))
+        nosleepBtn = NSButton(checkboxWithTitle: "息屏时不睡眠（每次息屏/关屏自动生效）", target: self, action: #selector(onNosleepToggled(_:)))
         root.addArrangedSubview(nosleepBtn)
-        lidBtn = NSButton(checkboxWithTitle: "合盖不睡眠（长期模式，重启自动恢复）", target: self, action: #selector(onLidToggled(_:)))
+        lidBtn = NSButton(checkboxWithTitle: "合盖后不睡眠（长期模式，重启自动恢复）", target: self, action: #selector(onLidToggled(_:)))
         root.addArrangedSubview(lidBtn)
         root.addArrangedSubview(wrapLabel("开启后合盖时内屏熄灭、机器持续运行——下载、远程访问、外接显示照常工作。" +
             "建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。"))
@@ -1057,7 +1057,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         if want && !ctl.helperInstalled() {
             lidBtn.state = .off
             let a = NSAlert()
-            a.messageText = "合盖不睡眠需要提权助手"
+            a.messageText = "「合盖后不睡眠」需要提权助手"
             a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
                 "点击下方「安装提权助手」（弹一次系统密码框）后再开启本项。"
             a.runModal()
@@ -1273,22 +1273,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 菜单
     private func buildMenu() -> NSMenu {
         let m = NSMenu()
-        stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        // MARK: 三个核心功能，表述一一对应：
+        //   ① 关闭显示器 —— 立即黑屏（机器保持运行）
+        //   ② 息屏时不睡眠 —— 每次息屏/关屏期间自动阻止系统睡眠
+        //   ③ 合盖后不睡眠 —— 合盖也持续运行（长期模式，重启自动恢复）
+        stateItem = NSMenuItem(title: "○ 屏幕正常", action: nil, keyEquivalent: "")
         m.addItem(stateItem)
         m.addItem(.separator())
         toggleItem = NSMenuItem(title: "关闭显示器", action: #selector(toggle(_:)), keyEquivalent: "")
         toggleItem.target = self
+        toggleItem.toolTip = "立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复"
         m.addItem(toggleItem)
-        nosleepItem = NSMenuItem(title: "防睡眠", action: #selector(toggleNosleep(_:)), keyEquivalent: "")
+        nosleepItem = NSMenuItem(title: "息屏时不睡眠", action: #selector(toggleAutoNosleep(_:)), keyEquivalent: "")
         nosleepItem.target = self
+        nosleepItem.toolTip = "开启后，每次息屏/关屏期间自动阻止系统睡眠，恢复显示时自动解除"
         m.addItem(nosleepItem)
         // 合盖模式：长期持久的「合盖也不睡」，由独立 CLI 守护持有，重启自动恢复
-        lidItem = NSMenuItem(title: "合盖不睡眠（长期运行）", action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
+        lidItem = NSMenuItem(title: "合盖后不睡眠（长期运行）", action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
         lidItem.target = self
+        lidItem.toolTip = "开启后合盖也不睡眠：内屏熄灭、机器持续运行；重启电脑后自动恢复"
         m.addItem(lidItem)
-        // 一键到位：装助手 + 开关屏联动 + 立即防睡眠。助手装好后此入口隐藏（设置面板仍可卸载）。
-        setupItem = NSMenuItem(title: "一键防睡眠（安装提权助手…）", action: #selector(runSetup(_:)), keyEquivalent: "")
+        // 首次使用装一次提权助手（弹系统密码框）；装好后此入口隐藏（设置面板仍可卸载）。
+        setupItem = NSMenuItem(title: "安装提权助手（首次使用）…", action: #selector(runSetup(_:)), keyEquivalent: "")
         setupItem.target = self
+        setupItem.toolTip = "让「息屏时不睡眠」「合盖后不睡眠」覆盖电池与合盖（需 root，弹一次密码框）"
         m.addItem(setupItem)
         m.addItem(.separator())
         let set = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
@@ -1316,16 +1324,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.toolTip = hotkeyUnavailable
             ? "BlankScreen —— 快捷键未生效：\(carbonStatusText(ctl.lastHotkeyStatus))"
             : "BlankScreen —— 快捷键 \(hotkeyText(ctl.cfg))，点击打开菜单"
-        stateItem.title = blacked ? "● 显示器已关闭（系统保持唤醒）" : "○ 显示正常"
-        toggleItem.title = blacked ? "恢复显示  \(hotkeyText(ctl.cfg))" : "关闭显示器  \(hotkeyText(ctl.cfg))"
-        nosleepItem.state = ctl.nosleepOn ? .on : .off
-        nosleepItem.title = ctl.nosleepOn
-            ? "防睡眠（\(ctl.nosleepLevelText)）"
-            : "防睡眠 —— 阻止系统睡眠"
+        stateItem.title = blacked ? "● 屏幕已关闭 · 机器运行中" : "○ 屏幕正常"
+        toggleItem.title = blacked ? "恢复显示器  \(hotkeyText(ctl.cfg))" : "关闭显示器  \(hotkeyText(ctl.cfg))"
+        // ② 息屏时不睡眠：勾选 = 自动联动已开启；黑屏中额外显示当前生效层级
+        nosleepItem.state = ctl.cfg.autoNosleep ? .on : .off
+        if blacked && ctl.nosleepOn {
+            nosleepItem.title = ctl.nosleepSystemOn
+                ? "息屏时不睡眠（已生效 · 系统级）"
+                : "息屏时不睡眠（已生效 · 仅接电源）"
+        } else {
+            nosleepItem.title = "息屏时不睡眠"
+        }
+        // ③ 合盖后不睡眠：勾选由系统菜单的原生 ✓ 表达，不再重复加字
         lidItem.state = ctl.lidOn ? .on : .off
-        lidItem.title = ctl.lidOn
-            ? "合盖不睡眠（长期运行）✓"
-            : "合盖不睡眠（长期运行）"
+        lidItem.title = "合盖后不睡眠（长期运行）"
         setupItem.isHidden = ctl.helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
@@ -1385,16 +1397,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func menuNeedsUpdate(_ menu: NSMenu) { refreshUI() }
     @objc private func toggle(_ sender: Any?) { ctl.toggle() }
 
-    @objc private func toggleNosleep(_ sender: Any?) {
-        if ctl.nosleepOn {
-            ctl.stopNosleep("菜单关闭")
+    /// ② 息屏时不睡眠：开关的是「自动联动」配置。已在黑屏中则立即生效/解除。
+    @objc private func toggleAutoNosleep(_ sender: Any?) {
+        var c = loadConfig()
+        c.autoNosleep.toggle()
+        saveConfig(c)
+        ctl.cfg = c
+        if c.autoNosleep {
+            if ctl.blacked { ctl.startNosleep(auto: true) }
+            notifyUser("已开启「息屏时不睡眠」：" +
+                (ctl.helperInstalled()
+                    ? "每次息屏/关屏期间自动阻止系统睡眠（系统级，覆盖合盖与电池）。"
+                    : "每次息屏/关屏期间自动阻止系统睡眠。注意：未安装提权助手时仅接电源有效，合盖仍会睡。"))
         } else {
-            ctl.startNosleep(auto: false)
-            // 降级必须说清楚：否则用户会以为合盖也不睡了，结果放进包里睡死
-            if !ctl.nosleepSystemOn {
-                notifyUser("防睡眠已开启（进程级）：仅在本机接电源时有效。" +
-                           "要覆盖电池与合盖，请在「设置」里安装提权助手。")
-            }
+            // 正在黑屏中的联动防睡眠随之解除；合盖模式（独立守护）不受影响
+            if ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep("已关闭「息屏时不睡眠」") }
+            notifyUser("已关闭「息屏时不睡眠」：息屏/关屏不再阻止系统睡眠。")
         }
         refreshUI()
     }
@@ -1404,13 +1422,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleLidAwake(_ sender: Any?) {
         if loadConfig().lidAwake {
             _ = ctl.setLidAwake(false)
-            notifyUser("合盖不睡眠已关闭：合盖后将恢复正常睡眠。")
+            notifyUser("「合盖后不睡眠」已关闭：合盖后将恢复正常睡眠。")
             refreshUI()
             return
         }
         guard ctl.helperInstalled() else {
             let a = NSAlert()
-            a.messageText = "合盖不睡眠需要提权助手"
+            a.messageText = "「合盖后不睡眠」需要提权助手"
             a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
                 "点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数），装完后再点本项即可。"
             a.addButton(withTitle: "一键安装并开启")
@@ -1427,12 +1445,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if ctl.setLidAwake(true) {
             let floor = ctl.cfg.batteryFloor
-            notifyUser("合盖不睡眠已开启：合盖后内屏关闭、机器持续运行（下载 / 远程 / 外接显示均可用）。" +
+            notifyUser("「合盖后不睡眠」已开启：合盖后内屏熄灭、机器持续运行（下载 / 远程 / 外接显示均可用）。" +
                        (floor > 0 ? "电池放电低于 \(floor)% 会自动停止。" : ""))
         } else {
             let a = NSAlert()
             a.alertStyle = .warning
-            a.messageText = "合盖不睡眠开启失败"
+            a.messageText = "「合盖后不睡眠」开启失败"
             a.informativeText = "可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。"
             a.runModal()
         }

@@ -24,7 +24,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 ## Highlights
 
 - **Zero permissions required.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries would otherwise lose TCC grants on each recompile).
-- **Menu bar app** (`BlankScreenBar.app`): click the status icon for on/off, a full settings panel (hotkey, fallback timeout, restore brightness, launch-at-login), built-in hotkey self-test, and log viewer.
+- **Menu bar app** (`BlankScreenBar.app`): click the status icon for three clearly-named functions — "关闭显示器" (black out now), "息屏时不睡眠" (auto-keep-awake during every blackout), "合盖后不睡眠" (lid-closed long-running mode) — plus a full settings panel (hotkey, fallback timeout, restore brightness, launch-at-login), built-in hotkey self-test, and log viewer.
 - **CLI** (`blankscreen`): `off` / `on` / `status` / `bright` / `config` — works over SSH, and either mode can toggle the other.
 - **Crash-safe**: if the app is ever killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) restores the display even if the hotkey dies.
 - **Battery guard**: on battery power (and discharging), blanking below a configurable floor (default 20%) is refused, and if the battery drops below the floor mid-blackout the display is restored automatically — a forgotten black screen can no longer drain your Mac. No effect on AC power.
