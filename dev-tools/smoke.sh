@@ -3,7 +3,7 @@
 #
 # 目的：把「改了代码还能不能用」从人工验证变成一条命令。
 # 覆盖：版本/诊断输出、参数校验、配置往返、电量保护、关屏与恢复、孤儿进程、
-#       防睡眠启停、提权助手资产一致性。
+#       防睡眠启停、合盖熄屏与恢复（模拟）、提权助手资产一致性。
 #
 # 用法:
 #   ./dev-tools/smoke.sh [CLI 路径]        # 默认 build/blankscreen
@@ -137,9 +137,46 @@ else
     bad "超时后未自动停止"
 fi
 
-# ---------- 8. 提权助手资产一致性 ----------
+# ---------- 8. 合盖熄屏与恢复（模拟合盖，不依赖物理开合盖子） ----------
 echo
-echo "【8】提权助手资产一致性（内嵌资产必须与仓库副本逐字相同）"
+echo "【8】合盖熄屏与恢复（BS_SIMULATE_LID_CLOSED 模拟）"
+log_file="$HOME/Library/Application Support/blankscreen/blankscreen.log"
+log_tail() {  # 打印自调用前累积行数之后的新日志
+    local n0="$1"
+    tail -n "+$((n0 + 1))" "$log_file" 2>/dev/null
+}
+if [ "$no_display" -eq 1 ]; then
+    skip_ "合盖熄屏" "无可用亮度接口"
+elif [ "$has_service" -eq 1 ]; then
+    skip_ "合盖熄屏" "菜单栏 App 常驻中，避免熄灭用户屏幕"
+else
+    "$B" nosleep off >/dev/null 2>&1
+    n0=$(wc -l < "$log_file" 2>/dev/null || echo 0)
+    # --timeout 8 兜底：即使断言失败守护也会自停，不留黑屏
+    BS_SIMULATE_LID_CLOSED=1 "$B" nosleep on --timeout 8 >/dev/null 2>&1
+    sleep 3
+    if log_tail "$n0" | grep -q "内屏已熄灭"; then
+        ok "合盖后内屏自动熄灭"
+    else
+        bad "合盖后未见熄屏记录（日志: $(log_tail "$n0" | grep '^lid' | tail -1)）"
+    fi
+    mid=$("$B" bright 2>/dev/null | awk '{print $NF}')
+    [ "$mid" = "0.0" ] && ok "合盖期间内屏亮度为 0" || bad "合盖期间亮度=$mid"
+    # 守护退出（此处为超时自停）必须恢复亮度——不留黑屏残局
+    sleep 7
+    if log_tail "$n0" | grep -q "恢复内屏亮度"; then
+        ok "守护停止时恢复内屏亮度"
+    else
+        bad "守护停止时未见恢复记录"
+    fi
+    after=$("$B" bright 2>/dev/null | awk '{print $NF}')
+    [ "$(awk -v a="$after" 'BEGIN{print (a>0.05)?"1":"0"}')" = "1" ] \
+        && ok "停止后内屏亮度已恢复（$after）" || bad "停止后内屏仍黑着（$after）"
+fi
+
+# ---------- 9. 提权助手资产一致性 ----------
+echo
+echo "【9】提权助手资产一致性（内嵌资产必须与仓库副本逐字相同）"
 tmp_assets=$(mktemp -d)
 "$B" nosleep write-assets "$tmp_assets" >/dev/null 2>&1
 if diff -q "$tmp_assets/com.blankscreen.pmset" packaging/helper/com.blankscreen.pmset >/dev/null 2>&1; then

@@ -142,6 +142,7 @@ The menu bar app offers the same one-click entry ("一键防睡眠") when the he
 In the menu bar app, click **"合盖不睡眠（长期运行）"** to enable with one click — no terminal needed:
 
 - **Closed lid = display off, machine keeps running**: downloads, remote access, external displays and long tasks all keep working
+- **Automatic lid blackout (since v1.5.2)**: the daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind
 - **Persistent**: the flag is saved in config; the daemon is restored automatically after app or system restarts
 - **Safety net**: auto-stops with a notification when the battery (discharging) drops below the floor (default 20%); turning it off resets `disablesleep`
 - **Independent of blackout linkage**: the lid daemon and blackout-linked anti-sleep are separate entries in the owner ledger, so toggling one never disturbs the other

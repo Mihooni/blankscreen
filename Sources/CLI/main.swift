@@ -12,6 +12,7 @@ import Foundation
 import CoreGraphics
 import AppKit
 import Carbon.HIToolbox
+import IOKit
 import Darwin
 
 // MARK: - 路径
@@ -208,6 +209,28 @@ func restoreBrightness(_ v: Float) -> Bool {
     return false
 }
 
+// MARK: - 内屏亮度（合盖熄屏专用，只动内屏，不碰外接屏）
+//
+// 合盖熄屏绝不能用 setBrightness(0)：那会把外接显示器也熄掉，而外接场景
+// （clamshell 模式）下用户可能正盯着外接屏工作。只操作内建显示器。
+func builtinDisplays() -> [CGDirectDisplayID] {
+    onlineDisplays().filter { CGDisplayIsBuiltin($0) != 0 }
+}
+
+@discardableResult
+func setBuiltinBrightness(_ v: Float) -> Bool {
+    var ok = false
+    for id in builtinDisplays() { if setOneBrightness(id, v) { ok = true } }
+    return ok
+}
+
+func builtinBrightness() -> Float {
+    guard let id = builtinDisplays().first,
+          let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") else { return -1 }
+    var v: Float = -1
+    return unsafeBitCast(p, to: DSGet.self)(id, &v) == 0 ? v : -1
+}
+
 // MARK: - 电池状态与通知
 // pmset -g batt 免任何授权。只有「电池供电且正在放电」才算有耗尽风险：
 // 插着电时哪怕电量低也不会耗尽，此时阻止用户关屏毫无意义。
@@ -239,6 +262,116 @@ func batteryStatus() -> Battery {
 func notify(_ msg: String) {
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""])
+}
+
+// MARK: - 合盖检测（SMC MSLD 键）
+//
+// 为什么需要它：pmset disablesleep 只阻止「睡眠」这件事本身。合盖后系统不睡了，
+// 但 macOS 也不会替我们熄灭内屏背光——屏幕在包里一直亮着（v1.5.1 及之前的缺陷）。
+// 防睡眠守护必须自己知道盖子何时合上：合盖 → 熄灭内屏，开盖 → 恢复亮度。
+//
+// SMC 的 MSLD 键是固件维护的合盖状态（1=合盖，0=开盖，Asahi Linux 内核驱动
+// macsmc-hid 即读它上报 SW_LID）。结构体与调用约定照搬 exelban/stats 的
+// 实现——SMC 用户客户端的字节级布局多年来只被证明在这份定义下正确。
+struct SMCKeyData_t {
+    struct vers_t {
+        var major: CUnsignedChar = 0
+        var minor: CUnsignedChar = 0
+        var build: CUnsignedChar = 0
+        var reserved: CUnsignedChar = 0
+        var release: CUnsignedShort = 0
+    }
+    struct LimitData_t {
+        var version: UInt16 = 0
+        var length: UInt16 = 0
+        var cpuPLimit: UInt32 = 0
+        var gpuPLimit: UInt32 = 0
+        var memPLimit: UInt32 = 0
+    }
+    struct keyInfo_t {
+        var dataSize: IOByteCount32 = 0
+        var dataType: UInt32 = 0
+        var dataAttributes: UInt8 = 0
+    }
+    var key: UInt32 = 0
+    var vers = vers_t()
+    var pLimitData = LimitData_t()
+    var keyInfo = keyInfo_t()
+    var padding: UInt16 = 0
+    var result: UInt8 = 0
+    var status: UInt8 = 0
+    var data8: UInt8 = 0
+    var data32: UInt32 = 0
+    var bytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) =
+               (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+
+final class SMCLid {
+    private var conn: io_connect_t = 0
+    private(set) var opened = false
+
+    /// 连接 AppleSMC。失败（台式机 / 虚拟机 / SMC 不可见）不致命，调用方降级即可。
+    func open() -> Bool {
+        guard !opened else { return true }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleSMC"), &iterator) == kIOReturnSuccess else { return false }
+        let device = IOIteratorNext(iterator)
+        IOObjectRelease(iterator)
+        guard device != 0 else { return false }
+        defer { IOObjectRelease(device) }
+        guard IOServiceOpen(device, mach_task_self_, 0, &conn) == kIOReturnSuccess else { return false }
+        opened = true
+        return true
+    }
+
+    func close() {
+        guard opened else { return }
+        IOServiceClose(conn)
+        conn = 0
+        opened = false
+    }
+
+    deinit { close() }
+
+    private func call(_ input: inout SMCKeyData_t, _ output: inout SMCKeyData_t) -> kern_return_t {
+        var outputSize = MemoryLayout<SMCKeyData_t>.stride
+        return withUnsafeMutablePointer(to: &input) { ip in
+            withUnsafeMutablePointer(to: &output) { op in
+                IOConnectCallStructMethod(conn, 2, ip, MemoryLayout<SMCKeyData_t>.stride, op, &outputSize)
+            }
+        }
+    }
+
+    /// 读 1 字节 SMC 键。返回 nil = 键不存在 / SMC 不响应。
+    private func readKeyByte(_ name: String) -> UInt8? {
+        guard name.utf8.count == 4 else { return nil }
+        var input = SMCKeyData_t()
+        var output = SMCKeyData_t()
+        input.key = name.utf8.reduce(0) { $0 << 8 | UInt32($1) }
+        input.data8 = 9                              // SMC_CMD_READ_KEYINFO
+        guard call(&input, &output) == kIOReturnSuccess, output.keyInfo.dataSize > 0 else { return nil }
+        input.keyInfo.dataSize = output.keyInfo.dataSize
+        input.data8 = 5                              // SMC_CMD_READ_BYTES
+        guard call(&input, &output) == kIOReturnSuccess else { return nil }
+        return output.bytes.0
+    }
+
+    /// 合盖状态：true = 已合盖。nil = 本机无法检测（台式机 / 虚拟机属正常）。
+    ///
+    /// 测试钩子：BS_SIMULATE_LID_CLOSED=1/0 强行指定合盖状态。
+    /// 仅供冒烟测试在「盖子无法物理开合」的环境里驱动熄屏/恢复路径，正式使用不读取。
+    func lidClosed() -> Bool? {
+        if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] {
+            let v = sim.lowercased()
+            return v == "1" || v == "yes" || v == "true" || v == "closed"
+        }
+        guard opened, let v = readKeyByte("MSLD") else { return nil }
+        return v == 1
+    }
 }
 
 // MARK: - 提权助手（防睡眠 Level 2：覆盖电池与合盖）
@@ -324,14 +457,16 @@ func nosleepInfo() -> NosleepInfo? {
 
 /// 清理残留：守护进程已死但 disablesleep 仍开着时，必须复位。
 /// 这是“卸载/崩溃后系统永不睡眠”的唯一补救通道（开机 LaunchDaemon 之外的第二道防线）。
+/// 不要求先有状态文件：残留也可能来自外部（其他工具写入、状态文件被清理等），
+/// 只要「没有我们的守护在跑 + 系统级开关仍开着」就该复位——doctor 对同一状态的
+/// 判定口径也是如此，不能出现「doctor 报错、推荐的修复命令却不生效」的自相矛盾。
 func recoverStaleNosleep() {
     guard nosleepPid() == nil else { return }
-    let hadState = fm.fileExists(atPath: nosleepStateFile) || fm.fileExists(atPath: nosleepPidFile)
     try? fm.removeItem(atPath: nosleepPidFile)
     try? fm.removeItem(atPath: nosleepStateFile)
-    guard hadState, helperInstalled(), systemSleepDisabled() else { return }
+    guard helperInstalled(), systemSleepDisabled() else { return }
     _ = helperExec("off")
-    log("nosleep: 检测到守护进程已消失但 disablesleep 仍开启，已自动复位")
+    log("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位")
 }
 
 // MARK: - 提权助手资产（内嵌为唯一真相源）
@@ -579,6 +714,57 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     var caff: Process?
     var stopped = false
 
+    // MARK: 合盖 → 熄灭内屏（v1.5.2）
+    //
+    // disablesleep 只阻止睡眠：合盖后 macOS 不会替我们关掉内屏背光，屏幕在包里
+    // 一直亮着。守护进程持有 disablesleep 的同时，也由它负责合盖熄屏——
+    // 守护退出（电量下限 / 超时 / 手动 off）时一并恢复亮度，不留黑屏残局。
+    let lidSMC = SMCLid()
+    var lidMonitorOn = false        // SMC 可读才启用（台式机 / 虚拟机自动禁用）
+    var lidDimmed = false           // 当前处于「已合盖 · 内屏已熄灭」状态
+    var lidSaved: Float = 0.5       // 合盖前的内屏亮度
+    var lidCloseStreak = 0          // 连续读数滤波：连续两次合盖才动作，防抖动误判
+    var lidPinTimer: Timer?
+
+    func lidRestoreBrightness(_ retryLog: String) {
+        let target = lidSaved
+        lidPinTimer?.invalidate(); lidPinTimer = nil
+        if setBuiltinBrightness(target) { return }
+        for i in 0..<5 {
+            usleep(UInt32(120_000 * (i + 1)))
+            if setBuiltinBrightness(target) { return }
+        }
+        log(retryLog)
+    }
+
+    func checkLid() {
+        guard lidMonitorOn, !stopped else { return }
+        guard let closed = lidSMC.lidClosed() else { return }
+        if closed {
+            lidCloseStreak += 1
+            guard lidCloseStreak >= 2, !lidDimmed else { return }
+            let cur = builtinBrightness()
+            lidSaved = cur > 0.001 ? cur : 0.5
+            if setBuiltinBrightness(0.0) {
+                lidDimmed = true
+                log("lid: 检测到合盖，内屏已熄灭（原亮度 \(lidSaved)，机器保持运行；外接屏不受影响）")
+                let p = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                    if lidDimmed { setBuiltinBrightness(0.0) }   // 压制环境光自动亮度
+                }
+                RunLoop.main.add(p, forMode: .common)
+                lidPinTimer = p
+            } else {
+                log("lid: 已合盖但内屏亮度设置失败（DisplayServices 不可用？），本机屏幕将继续点亮")
+            }
+        } else {
+            lidCloseStreak = 0
+            guard lidDimmed else { return }
+            lidDimmed = false
+            log("lid: 检测到开盖，恢复内屏亮度 \(lidSaved)")
+            lidRestoreBrightness("lid: 错误：内屏亮度恢复失败，请手动调整亮度")
+        }
+    }
+
     func stop(_ reason: String, notifyUser: Bool) {
         guard !stopped else { return }
         stopped = true
@@ -587,6 +773,14 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
             _ = helperExec("off")
             log("nosleep: 已复位 disablesleep=0")
         }
+        // 守护退出时若内屏还处于合盖熄灭状态，必须先恢复亮度再走，
+        // 否则用户开盖后屏幕是黑的，而能负责恢复的进程已经不在了
+        if lidDimmed {
+            lidDimmed = false
+            log("lid: 守护退出，恢复内屏亮度 \(lidSaved)")
+            lidRestoreBrightness("lid: 错误：退出时内屏亮度恢复失败，请手动调整亮度")
+        }
+        lidSMC.close()
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: nosleepPidFile)
         try? fm.removeItem(atPath: nosleepStateFile)
@@ -619,10 +813,32 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
     log("nosleep 启动 pid=\(myPid) 层级=\(level)")
 
+    // 合盖检测启用：SMC 读得到 MSLD 才开（笔记本）。台式机 / 虚拟机读不到，静默禁用。
+    // BS_SIMULATE_LID_CLOSED 存在时无条件启用（冒烟测试驱动熄屏/恢复路径）。
+    let simLid = ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] != nil
+    if lidSMC.open(), lidSMC.lidClosed() != nil {
+        lidMonitorOn = true
+        let nowClosed = lidSMC.lidClosed() == true
+        log("lid: SMC 合盖检测已启用（当前：\(nowClosed ? "已合盖" : "开盖")）")
+        if nowClosed {
+            // 以合盖状态启动（如重启自动恢复时盖子已合上）：直接按合盖处理，
+            // 不等轮询，避免「启动即合盖」的窗口期屏幕继续亮着
+            lidCloseStreak = 2
+            checkLid()
+        }
+    } else if simLid {
+        lidMonitorOn = true
+        log("lid: 测试模式（BS_SIMULATE_LID_CLOSED=\(ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] ?? "")）")
+    } else {
+        log("lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用")
+        lidSMC.close()
+    }
+
     for sig in [SIGTERM, SIGINT, SIGHUP] { signal(sig) { _ in nosleepStopFlag = true } }
 
     let poll = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
         if nosleepStopFlag { stop("收到退出信号", notifyUser: false); exit(0) }
+        checkLid()
     }
     RunLoop.main.add(poll, forMode: .common)
 
@@ -1243,6 +1459,16 @@ func runDoctor() -> Int32 {
         print("     → 一键安装：blankscreen nosleep setup")
     }
 
+    print("\n【合盖检测】")
+    let lid = SMCLid()
+    if lid.open(), let closed = lid.lidClosed() {
+        print("  ✅ SMC 合盖检测可用（MSLD），当前：\(closed ? "已合盖" : "开盖")")
+        print("     防睡眠运行期间合盖会自动熄灭内屏，开盖自动恢复")
+        lid.close()
+    } else {
+        print("  ⚠️  SMC 合盖检测不可用（台式机 / 虚拟机属正常；合盖熄屏功能将自动禁用）")
+    }
+
     print("\n【残留进程】")
     let orphans = orphanCaffeinate()
     if orphans.isEmpty {
@@ -1478,6 +1704,15 @@ case "nosleep":
         let helper = helperInstalled()
         print("防睡眠: \(nosleepPid() != nil ? "已开启" : "未开启")")
         print("  合盖模式: \(loadConfig().lidAwake ? "开（重启后自动恢复）" : "关")（菜单栏 App 可一键开关）")
+        if loadConfig().lidAwake, nosleepPid() != nil {
+            let lid = SMCLid()
+            if lid.open(), let closed = lid.lidClosed() {
+                print("  内屏: \(closed ? "已合盖（已自动熄灭）" : "开盖")，SMC 合盖检测正常")
+                lid.close()
+            } else {
+                print("  ⚠️ SMC 合盖检测不可用，合盖自动熄屏已禁用（台式机/虚拟机属正常）")
+            }
+        }
         if let info = nosleepInfo() {
             let mins = Int(Date().timeIntervalSince(info.since) / 60)
             print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
@@ -1765,6 +2000,9 @@ default:
     为什么系统级需要助手: caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，
     所以电池供电与合盖这两种场景，进程级断言无解，只能用 pmset disablesleep（需 root）。
     助手只授权单个 root:wheel 脚本的四个固定参数，且默认不安装。
+
+    合盖熄屏: 防睡眠运行期间，守护进程经 SMC 检测合盖并自动熄灭内屏（外接屏不受
+    影响），开盖自动恢复亮度；守护停止时也会恢复，不留黑屏残局。
 
     默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
     热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。
