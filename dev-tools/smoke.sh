@@ -211,8 +211,10 @@ rm -rf "$tmp_assets"
 # ---------- 10. 本地化 ----------
 echo
 echo "【10】本地化（界面语言跟随系统，可用 BLANKSCREEN_LANG 覆盖）"
-if BLANKSCREEN_LANG=en "$B" doctor 2>/dev/null | grep -q '[一-鿿]'; then
+en_out=$(BLANKSCREEN_LANG=en "$B" doctor 2>/dev/null)
+if printf '%s' "$en_out" | grep -q '[一-鿿]'; then
     bad "英文模式下仍有中文残留"
+    printf '%s\n' "$en_out" | grep -n '[一-鿿]' | head -5 | sed 's/^/      残留: /'
 else
     ok "英文模式输出无中文残留"
 fi
