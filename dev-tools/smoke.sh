@@ -145,8 +145,13 @@ log_tail() {  # 打印自调用前累积行数之后的新日志
     local n0="$1"
     tail -n "+$((n0 + 1))" "$log_file" 2>/dev/null
 }
-if [ "$no_display" -eq 1 ]; then
-    skip_ "合盖熄屏" "无可用亮度接口"
+# doctor 只能判断 DisplayServices 是否加载；CI 虚拟机加载了却读不到真实亮度。
+# 这里直接探测：`bright` 必须返回可解析的数值才认为亮度接口真正可用。
+bright_ok=0
+probe=$("$B" bright 2>/dev/null | awk '{print $NF}')
+case "$probe" in ''|*[!0-9.]*) bright_ok=0 ;; *) bright_ok=1 ;; esac
+if [ "$bright_ok" -eq 0 ]; then
+    skip_ "合盖熄屏" "无可用亮度接口（CI 虚拟显示）"
 elif [ "$has_service" -eq 1 ]; then
     skip_ "合盖熄屏" "菜单栏 App 常驻中，避免熄灭用户屏幕"
 else
@@ -161,7 +166,7 @@ else
         bad "合盖后未见熄屏记录（日志: $(log_tail "$n0" | grep '^lid' | tail -1)）"
     fi
     mid=$("$B" bright 2>/dev/null | awk '{print $NF}')
-    [ "$mid" = "0.0" ] && ok "合盖期间内屏亮度为 0" || bad "合盖期间亮度=$mid"
+    [ "$mid" = "0.0" ] && ok "合盖期间内屏亮度为 0" || bad "合盖期间亮度=${mid}"
     # 守护退出（此处为超时自停）必须恢复亮度——不留黑屏残局
     sleep 7
     if log_tail "$n0" | grep -q "恢复内屏亮度"; then
@@ -170,8 +175,9 @@ else
         bad "守护停止时未见恢复记录"
     fi
     after=$("$B" bright 2>/dev/null | awk '{print $NF}')
+    # 注意：$after 后必须用 ${after} 界定——后跟全角括号会被 bash 3.2 当成变量名的一部分
     [ "$(awk -v a="$after" 'BEGIN{print (a>0.05)?"1":"0"}')" = "1" ] \
-        && ok "停止后内屏亮度已恢复（$after）" || bad "停止后内屏仍黑着（$after）"
+        && ok "停止后内屏亮度已恢复（${after}）" || bad "停止后内屏仍黑着（${after}）"
 fi
 
 # ---------- 9. 提权助手资产一致性 ----------
