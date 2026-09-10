@@ -469,16 +469,37 @@ func nosleepInfo() -> NosleepInfo? {
     return i
 }
 
+/// 第三方防睡眠持有者：远控类软件（UURemote / ToDesk / 向日葵等）以 root 周期性
+/// 写入 pmset disablesleep=1 保持远程会话可用——它们与本程序共享这一个全局开关。
+/// 本机实测（UURemoteHelper，root XPC）：无 sudo 记录、约 1-2 分钟节奏重写。
+/// 检测到它们在跑时，「无守护 + 开关开着」不算本程序的残留：复位只会互相打架
+/// （我们关→它再开→doctor 永远报红），应共存并如实告知用户。
+func thirdPartySleepHolder() -> String? {
+    let names = ["UURemote", "ToDesk", "SunloginClient", "SunloginAword", "OrayRemote",
+                 "TeamViewer", "AnyDesk", "RustDesk", "rustdesk", "Parsec", "Splashtop"]
+    for n in names {
+        if let out = runCapture("/usr/bin/pgrep", ["-f", n]), !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return n
+        }
+    }
+    return nil
+}
+
 /// 清理残留：守护进程已死但 disablesleep 仍开着时，必须复位。
 /// 这是“卸载/崩溃后系统永不睡眠”的唯一补救通道（开机 LaunchDaemon 之外的第二道防线）。
 /// 不要求先有状态文件：残留也可能来自外部（其他工具写入、状态文件被清理等），
 /// 只要「没有我们的守护在跑 + 系统级开关仍开着」就该复位——doctor 对同一状态的
 /// 判定口径也是如此，不能出现「doctor 报错、推荐的修复命令却不生效」的自相矛盾。
+/// 例外：远控软件在持有该开关时（见 thirdPartySleepHolder）绝不复位。
 func recoverStaleNosleep() {
     guard nosleepPid() == nil else { return }
     try? fm.removeItem(atPath: nosleepPidFile)
     try? fm.removeItem(atPath: nosleepStateFile)
     guard helperInstalled(), systemSleepDisabled() else { return }
+    if let app = thirdPartySleepHolder() {
+        log("nosleep: disablesleep 开启但无本程序守护；检测到远控软件 \(app) 在运行，判定为其持有（保持远程可用），不复位")
+        return
+    }
     _ = helperExec("off")
     log("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位")
 }
@@ -1465,8 +1486,12 @@ func runDoctor() -> Int32 {
         print("  系统级开关: \(systemSleepDisabled() ? "开启（系统当前不会睡眠）" : "关闭")")
         if let pid = nosleepPid() { print("  守护进程: 运行中 pid=\(pid)") }
         else if systemSleepDisabled() {
-            errors.append("disablesleep 残留")
-            print("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位")
+            if let app = thirdPartySleepHolder() {
+                print("  ℹ️ 无本程序守护，但检测到远控软件 \(app) 在运行——系统级开关由其持有以保持远程可用，属正常共存，无需处理")
+            } else {
+                errors.append("disablesleep 残留")
+                print("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位")
+            }
         }
     } else {
         print("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠")
@@ -1742,7 +1767,11 @@ case "nosleep":
             print("  系统级开关: \(systemSleepDisabled() ? "开启（系统不会睡眠）" : "关闭")")
         }
         if nosleepPid() == nil && helper && systemSleepDisabled() {
-            print("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位")
+            if let app = thirdPartySleepHolder() {
+                print("  ℹ️ 系统级开关由远控软件 \(app) 持有（保持远程可用），与本程序共存，无需处理")
+            } else {
+                print("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位")
+            }
         }
 
     case "detect":
