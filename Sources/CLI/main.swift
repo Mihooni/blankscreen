@@ -121,9 +121,10 @@ struct Config: Codable {
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
-    var lidAwake: Bool = false                               // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
+    var lidAwake: Bool = false
+    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en                               // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lang }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -134,6 +135,7 @@ struct Config: Codable {
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
+        lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
     }
 }
 func loadConfig() -> Config {
@@ -425,7 +427,7 @@ func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
     do {
         try scriptBody.write(toFile: f, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f)
-    } catch { return (false, "无法写入临时脚本: \(error)") }
+    } catch { return (false, (L("无法写入临时脚本: ") + "\(error)")) }
     defer { try? fm.removeItem(atPath: f) }
     // 路径含空格（~/Library/Application Support/...），必须整体加引号再交给
     // do shell script：不加引号会被 sh 拆成「不存在的命令 + 参数」，
@@ -437,13 +439,13 @@ func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
     p.arguments = ["-e", "do shell script \"'\(safe)'\" with administrator privileges"]
     p.standardInput = FileHandle.nullDevice
     let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-    do { try p.run() } catch { return (false, "无法启动 osascript: \(error)") }
+    do { try p.run() } catch { return (false, (L("无法启动 osascript: ") + "\(error)")) }
     // 必须先读再等：管道缓冲写满会让子进程卡死在 write 上
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
     let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     // 以退出码判定成败；输出只用于展示（osascript 的报错文本在 stderr，已合并进来）
-    return (p.terminationStatus == 0, out.isEmpty ? (p.terminationStatus == 0 ? "完成" : "授权失败或被取消") : out)
+    return (p.terminationStatus == 0, out.isEmpty ? (p.terminationStatus == 0 ? L("完成") : L("授权失败或被取消")) : out)
 }
 
 // MARK: - 防睡眠状态
@@ -497,11 +499,11 @@ func recoverStaleNosleep() {
     try? fm.removeItem(atPath: nosleepStateFile)
     guard helperInstalled(), systemSleepDisabled() else { return }
     if let app = thirdPartySleepHolder() {
-        log("nosleep: disablesleep 开启但无本程序守护；检测到远控软件 \(app) 在运行，判定为其持有（保持远程可用），不复位")
+        log((L("nosleep: disablesleep 开启但无本程序守护；检测到远控软件 ") + "\(app)" + L(" 在运行，判定为其持有（保持远程可用），不复位")))
         return
     }
     _ = helperExec("off")
-    log("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位")
+    log(L("nosleep: 检测到 disablesleep 仍开启但无守护进程，已自动复位"))
 }
 
 // MARK: - 提权助手资产（内嵌为唯一真相源）
@@ -782,21 +784,21 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
             lidSaved = cur > 0.001 ? cur : 0.5
             if setBuiltinBrightness(0.0) {
                 lidDimmed = true
-                log("lid: 检测到合盖，内屏已熄灭（原亮度 \(lidSaved)，机器保持运行；外接屏不受影响）")
+                log((L("lid: 检测到合盖，内屏已熄灭（原亮度 ") + "\(lidSaved)" + L("，机器保持运行；外接屏不受影响）")))
                 let p = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
                     if lidDimmed { setBuiltinBrightness(0.0) }   // 压制环境光自动亮度
                 }
                 RunLoop.main.add(p, forMode: .common)
                 lidPinTimer = p
             } else {
-                log("lid: 已合盖但内屏亮度设置失败（DisplayServices 不可用？），本机屏幕将继续点亮")
+                log(L("lid: 已合盖但内屏亮度设置失败（DisplayServices 不可用？），本机屏幕将继续点亮"))
             }
         } else {
             lidCloseStreak = 0
             guard lidDimmed else { return }
             lidDimmed = false
-            log("lid: 检测到开盖，恢复内屏亮度 \(lidSaved)")
-            lidRestoreBrightness("lid: 错误：内屏亮度恢复失败，请手动调整亮度")
+            log((L("lid: 检测到开盖，恢复内屏亮度 ") + "\(lidSaved)"))
+            lidRestoreBrightness(L("lid: 错误：内屏亮度恢复失败，请手动调整亮度"))
         }
     }
 
@@ -806,21 +808,21 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         // 系统级开关是持久的，退出前必须显式复位，否则系统再也不会睡眠
         if systemOn {
             _ = helperExec("off")
-            log("nosleep: 已复位 disablesleep=0")
+            log(L("nosleep: 已复位 disablesleep=0"))
         }
         // 守护退出时若内屏还处于合盖熄灭状态，必须先恢复亮度再走，
         // 否则用户开盖后屏幕是黑的，而能负责恢复的进程已经不在了
         if lidDimmed {
             lidDimmed = false
-            log("lid: 守护退出，恢复内屏亮度 \(lidSaved)")
-            lidRestoreBrightness("lid: 错误：退出时内屏亮度恢复失败，请手动调整亮度")
+            log((L("lid: 守护退出，恢复内屏亮度 ") + "\(lidSaved)"))
+            lidRestoreBrightness(L("lid: 错误：退出时内屏亮度恢复失败，请手动调整亮度"))
         }
         lidSMC.close()
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: nosleepPidFile)
         try? fm.removeItem(atPath: nosleepStateFile)
-        log("nosleep 停止：\(reason)")
-        if notifyUser { notify("已停止防睡眠：\(reason)") }
+        log((L("nosleep 停止：") + "\(reason)"))
+        if notifyUser { notify((L("已停止防睡眠：") + "\(reason)")) }
     }
 
     // Level 1：进程级断言（零权限）。-w 保证本进程一旦退出 caffeinate 自动回收，杜绝孤儿。
@@ -836,17 +838,17 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         if let r = helperExec("on"), r == "on", systemSleepDisabled() {
             systemOn = true
             level = "system"
-            log("nosleep: 系统级防睡眠已开启（disablesleep=1），覆盖电池与合盖")
+            log(L("nosleep: 系统级防睡眠已开启（disablesleep=1），覆盖电池与合盖"))
         } else {
-            log("nosleep: 系统级防睡眠不可用，降级为 caffeinate（仅 AC 有效）")
-            notify("防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠")
+            log(L("nosleep: 系统级防睡眠不可用，降级为 caffeinate（仅 AC 有效）"))
+            notify(L("防睡眠降级为「仅电源适配器」：未安装提权助手，电池与合盖仍会睡眠"))
         }
     }
 
     try? String(myPid).write(toFile: nosleepPidFile, atomically: true, encoding: .utf8)
     try? "\(level)|\(Date().timeIntervalSince1970)|\(systemOn ? 1 : 0)"
         .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
-    log("nosleep 启动 pid=\(myPid) 层级=\(level)")
+    log((L("nosleep 启动 pid=") + "\(myPid)" + L(" 层级=") + "\(level)"))
 
     // 合盖检测启用：SMC 读得到 MSLD 才开（笔记本）。台式机 / 虚拟机读不到，静默禁用。
     // BS_SIMULATE_LID_CLOSED 存在时无条件启用（冒烟测试驱动熄屏/恢复路径）。
@@ -854,7 +856,7 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     if lidSMC.open(), lidSMC.lidClosed() != nil {
         lidMonitorOn = true
         let nowClosed = lidSMC.lidClosed() == true
-        log("lid: SMC 合盖检测已启用（当前：\(nowClosed ? "已合盖" : "开盖")）")
+        log((L("lid: SMC 合盖检测已启用（当前：") + "\(nowClosed ? L("已合盖") : L("开盖"))" + L("）")))
         if nowClosed {
             // 以合盖状态启动（如重启自动恢复时盖子已合上）：直接按合盖处理，
             // 不等轮询，避免「启动即合盖」的窗口期屏幕继续亮着
@@ -863,16 +865,16 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         }
     } else if simLid {
         lidMonitorOn = true
-        log("lid: 测试模式（BS_SIMULATE_LID_CLOSED=\(ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] ?? "")）")
+        log((L("lid: 测试模式（BS_SIMULATE_LID_CLOSED=") + "\(ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] ?? "")" + L("）")))
     } else {
-        log("lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用")
+        log(L("lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用"))
         lidSMC.close()
     }
 
     for sig in [SIGTERM, SIGINT, SIGHUP] { signal(sig) { _ in nosleepStopFlag = true } }
 
     let poll = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-        if nosleepStopFlag { stop("收到退出信号", notifyUser: false); exit(0) }
+        if nosleepStopFlag { stop(L("收到退出信号"), notifyUser: false); exit(0) }
         checkLid()
     }
     RunLoop.main.add(poll, forMode: .common)
@@ -883,7 +885,7 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         let g = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
             let b = batteryStatus()
             guard b.onBattery, b.discharging, b.percent <= cfg.batteryFloor else { return }
-            let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动停止防睡眠"
+            let m = (L("电量 ") + "\(b.percent)" + L("% 已达下限 ") + "\(cfg.batteryFloor)" + L("%，自动停止防睡眠"))
             log(m); clearLidAwake(); stop(m, notifyUser: true); exit(0)
         }
         RunLoop.main.add(g, forMode: .common)
@@ -891,9 +893,9 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
 
     if let t = timeout, t > 0 {
         Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in
-            log("nosleep: 超时 \(Int(t))s")
+            log((L("nosleep: 超时 ") + "\(Int(t))" + "s"))
             clearLidAwake()
-            stop("已到设定时长 \(Int(t)) 秒", notifyUser: true); exit(0)
+            stop((L("已到设定时长 ") + "\(Int(t))" + L(" 秒")), notifyUser: true); exit(0)
         }
     }
     runAppLoop()
@@ -917,7 +919,7 @@ func spawnNosleepDaemon(wantSystem: Bool, timeout: TimeInterval?) -> (pid: Int32
     p.arguments = a
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
     do { try p.run() } catch {
-        FileHandle.standardError.write("启动防睡眠守护进程失败: \(error)\n".data(using: .utf8)!)
+        FileHandle.standardError.write((L("启动防睡眠守护进程失败: ") + "\(error)" + "\n").data(using: .utf8)!)
         return nil
     }
     _ = waitUntil(timeout: 5.0) { nosleepPid() != nil }
@@ -938,7 +940,7 @@ func modsText(_ flags: UInt64) -> String {
     if flags & MOD_ALT   != 0 { s += "⌥" }
     if flags & MOD_SHIFT != 0 { s += "⇧" }
     if flags & MOD_CMD   != 0 { s += "⌘" }
-    return s.isEmpty ? "（无修饰键）" : s
+    return s.isEmpty ? L("（无修饰键）") : s
 }
 
 // MARK: - 全局热键（Carbon Event Manager，无需任何系统授权）
@@ -961,7 +963,7 @@ func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_C
                 DispatchQueue.main.async { carbonFire?() }
                 return noErr
             }, 1, &spec, nil, &carbonHandlerRef)
-        guard st == noErr else { log("热键事件处理器安装失败 status=\(st)"); return }
+        guard st == noErr else { log((L("热键事件处理器安装失败 status=") + "\(st)")); return }
     }
     if let old = carbonHotKeyRef { UnregisterEventHotKey(old); carbonHotKeyRef = nil }
     var m: UInt32 = 0
@@ -972,11 +974,11 @@ func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_C
     let hid = EventHotKeyID(signature: 0x424C4E4B, id: 1)   // 'BLNK'
     let st = RegisterEventHotKey(UInt32(keyCode), m, hid, GetEventDispatcherTarget(), 0, &carbonHotKeyRef)
     if st == noErr {
-        log("全局热键已注册 \(modsText(modFlags))\(keyName(keyCode))（Carbon 链路，无需授权）")
+        log((L("全局热键已注册 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("（Carbon 链路，无需授权）")))
     } else if st == OSStatus(eventHotKeyExistsErr) {
-        log("热键注册失败 \(modsText(modFlags))\(keyName(keyCode))：组合已被其他 App 占用（blankscreen config --mods ... --key ... 换一个）")
+        log((L("热键注册失败 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("：组合已被其他 App 占用（blankscreen config --mods ... --key ... 换一个）")))
     } else {
-        log("热键注册失败 \(modsText(modFlags))\(keyName(keyCode)) status=\(st)")
+        log((L("热键注册失败 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + " status=" + "\(st)"))
     }
 }
 
@@ -1001,13 +1003,23 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     recoverStaleNosleep()   // 上次异常退出遗留的 disablesleep 必须先复位
     // DisplayServices 不可用时，黑屏根本不会发生——必须明确报错，不能让命令「成功」但屏幕还亮着
     guard dsAvailable else {
-        let m = "无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）"
+        let m = L("无法访问 DisplayServices 私有框架，亮度控制不可用（本 macOS 可能已移除它）")
         try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
-        FileHandle.standardError.write("""
-        错误：\(m)
-        本工具依赖该框架把亮度置 0 实现关屏。请在
-        https://github.com/Mihooni/blankscreen/issues 反馈你的系统版本。
-        """.data(using: .utf8)!)
+        let errBody: String
+        if L10n.isEN {
+            errBody = """
+            Error: \(m)
+            This tool needs that framework to set brightness to 0. Please report your macOS version at
+            https://github.com/Mihooni/blankscreen/issues
+            """
+        } else {
+            errBody = """
+            错误：\(m)
+            本工具依赖该框架把亮度置 0 实现关屏。请在
+            https://github.com/Mihooni/blankscreen/issues 反馈你的系统版本。
+            """
+        }
+        FileHandle.standardError.write(errBody.data(using: .utf8)!)
         exit(1)
     }
     // 电量下限：电池供电时拒绝进入黑屏。黑屏 + 阻止睡眠的组合最容易让人忘记，
@@ -1015,7 +1027,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     if cfg.batteryFloor > 0 {
         let b = batteryStatus()
         if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-            let m = "电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）"
+            let m = (L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消关屏（避免耗尽电池）"))
             try? m.write(toFile: rejectFile, atomically: true, encoding: .utf8)
             FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
             log(m); notify(m)
@@ -1029,7 +1041,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     let restoreTarget = cfg.restoreFixed ?? saved
     try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
     try? String(ProcessInfo.processInfo.processIdentifier).write(toFile: pidFile, atomically: true, encoding: .utf8)
-    log("daemon 启动 pid=\(ProcessInfo.processInfo.processIdentifier) 原亮度=\(saved)")
+    log((L("daemon 启动 pid=") + "\(ProcessInfo.processInfo.processIdentifier)" + L(" 原亮度=") + "\(saved)"))
 
     // auto-nosleep：黑屏期间同时阻止系统睡眠。系统级开关（disablesleep）是持久的，
     // 必须在恢复显示时显式复位，否则合盖永远不睡、放在包里一直耗电。
@@ -1040,7 +1052,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
         // 写状态标记：进程被 SIGKILL 时，下次启动 recoverStaleNosleep 能据此复位 disablesleep
         try? "system|\(Date().timeIntervalSince1970)|1"
             .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
-        log("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）")
+        log(L("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）"))
     }
     let caff = Process()
     caff.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
@@ -1066,18 +1078,18 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
         if nosleepSystemOn {
             _ = helperExec("off"); nosleepSystemOn = false
             try? fm.removeItem(atPath: nosleepStateFile)
-            log("nosleep: 已复位 disablesleep=0")
+            log(L("nosleep: 已复位 disablesleep=0"))
         }
-        log("恢复亮度 \(restoreTarget)，结束 caffeinate")
+        log((L("恢复亮度 ") + "\(restoreTarget)" + L("，结束 caffeinate")))
         caff.terminate()
         // 恢复失败绝不能就此退出：那样屏幕会永久黑着，而用户没有任何自救手段
         // （热键已随进程消亡）。失败就留在原地持续重试，直到亮度真的回来。
         if !restoreBrightness(restoreTarget) {
-            log("错误：亮度恢复失败，转入持续重试（屏幕必须亮回来）")
-            notify("亮度恢复失败，正在持续重试")
+            log(L("错误：亮度恢复失败，转入持续重试（屏幕必须亮回来）"))
+            notify(L("亮度恢复失败，正在持续重试"))
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
                 if restoreBrightness(restoreTarget) {
-                    log("重试成功，亮度已恢复 \(restoreTarget)")
+                    log((L("重试成功，亮度已恢复 ") + "\(restoreTarget)"))
                     exit(0)
                 }
             }
@@ -1093,14 +1105,14 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
     cliSignalTerm = false
     for sig in [SIGTERM, SIGINT, SIGHUP] { signal(sig) { _ in cliSignalTerm = true } }
     let sigTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-        if cliSignalTerm { log("收到终止信号"); cleanup() }
+        if cliSignalTerm { log(L("收到终止信号")); cleanup() }
     }
     RunLoop.main.add(sigTimer, forMode: .common)
 
-    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags) { log("热键触发"); cleanup() }
+    installHotkey(keyCode: keyCode, modFlags: cfg.modFlags) { log(L("热键触发")); cleanup() }
 
     if let t = timeout {
-        Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in log("超时自动恢复"); cleanup() }
+        Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in log(L("超时自动恢复")); cleanup() }
     }
     // 黑屏期间持续监控电量：跌破下限就自动恢复，别等电池耗尽才被发现
     if cfg.batteryFloor > 0 {
@@ -1108,7 +1120,7 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
             guard !restored else { return }
             let b = batteryStatus()
             guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
-            let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
+            let m = (L("电量 ") + "\(b.percent)" + L("% 已达下限 ") + "\(cfg.batteryFloor)" + L("%，自动恢复显示"))
             log(m); notify(m)
             cleanup()
         }
@@ -1123,17 +1135,17 @@ func runService(keyCode: Int64) -> Never {
     let myPid = ProcessInfo.processInfo.processIdentifier
     // 互斥：已有存活常驻服务（CLI daemon 或菜单栏 App）时拒绝启动，避免双服务抢状态
     if let other = servicePid(), other != myPid {
-        log("service 拒绝启动 pid=\(myPid)：已有常驻服务 pid=\(other) 在运行")
-        FileHandle.standardError.write("已有常驻服务在运行 (pid \(other))，本实例退出\n".data(using: .utf8)!)
+        log((L("service 拒绝启动 pid=") + "\(myPid)" + L("：已有常驻服务 pid=") + "\(other)" + L(" 在运行")))
+        FileHandle.standardError.write((L("已有常驻服务在运行 (pid ") + "\(other)" + L(")，本实例退出\n")).data(using: .utf8)!)
         exit(1)
     }
     try? String(myPid).write(toFile: serviceFile, atomically: true, encoding: .utf8)
-    log("service 启动 pid=\(myPid)")
+    log((L("service 启动 pid=") + "\(myPid)"))
 
     // 自愈：上次异常退出遗留的黑屏状态
     if let s = try? String(contentsOfFile: stateFile, encoding: .utf8),
        let v = Float(s.trimmingCharacters(in: .whitespacesAndNewlines)), v > 0.001 {
-        log("发现遗留黑屏状态，自愈恢复到 \(v)")
+        log((L("发现遗留黑屏状态，自愈恢复到 ") + "\(v)"))
         restoreBrightness(v)
     }
     try? fm.removeItem(atPath: stateFile)
@@ -1157,15 +1169,15 @@ func runService(keyCode: Int64) -> Never {
         battTimer?.invalidate(); battTimer = nil
         restoreRetry?.invalidate(); restoreRetry = nil
         let target = cfg.restoreFixed ?? saved
-        log("service 恢复显示 \(target)")
+        log((L("service 恢复显示 ") + "\(target)"))
         // 恢复失败不能就此罢休：屏幕会一直黑着，而常驻服务本身还在运行，
         // 用户很难想到要杀进程。必须持续重试直到真的亮回来。
         if !restoreBrightness(target) {
-            log("错误：亮度恢复失败，转入持续重试")
-            notify("亮度恢复失败，正在持续重试")
+            log(L("错误：亮度恢复失败，转入持续重试"))
+            notify(L("亮度恢复失败，正在持续重试"))
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { t in
                 if restoreBrightness(target) {
-                    log("重试成功，亮度已恢复 \(target)")
+                    log((L("重试成功，亮度已恢复 ") + "\(target)"))
                     t.invalidate(); restoreRetry = nil
                 }
             }
@@ -1175,7 +1187,7 @@ func runService(keyCode: Int64) -> Never {
         if nosleepSystemOn {
             _ = helperExec("off"); nosleepSystemOn = false
             try? fm.removeItem(atPath: nosleepStateFile)
-            log("nosleep: 已复位 disablesleep=0")
+            log(L("nosleep: 已复位 disablesleep=0"))
         }
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: stateFile)
@@ -1191,7 +1203,7 @@ func runService(keyCode: Int64) -> Never {
     /// 否则会出现「命令看起来成功、屏幕其实还亮着」的静默失败。
     /// 热键动作单独抽出来：配置热重载后重新注册时复用同一份行为，避免两处逻辑分叉
     func hotkeyAction() {
-        log("热键触发")
+        log(L("热键触发"))
         if blacked { restore() } else { _ = blackout() }
     }
 
@@ -1200,7 +1212,7 @@ func runService(keyCode: Int64) -> Never {
         timeoutTimer?.invalidate(); timeoutTimer = nil
         if cfg.timeout > 0 {
             let tt = Timer.scheduledTimer(withTimeInterval: cfg.timeout, repeats: false) { _ in
-                log("兜底超时 \(Int(cfg.timeout))s，自动恢复")
+                log((L("兜底超时 ") + "\(Int(cfg.timeout))" + L("s，自动恢复")))
                 restore()
             }
             RunLoop.main.add(tt, forMode: .common)
@@ -1212,7 +1224,7 @@ func runService(keyCode: Int64) -> Never {
                 guard blacked else { return }
                 let b = batteryStatus()
                 guard b.onBattery && b.discharging, b.percent <= cfg.batteryFloor else { return }
-                let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动恢复显示"
+                let m = (L("电量 ") + "\(b.percent)" + L("% 已达下限 ") + "\(cfg.batteryFloor)" + L("%，自动恢复显示"))
                 log(m); notify(m)
                 restore()
             }
@@ -1232,7 +1244,7 @@ func runService(keyCode: Int64) -> Never {
             cfg = n
             if keyChanged { installHotkey(keyCode: cfg.keyCode, modFlags: cfg.modFlags, fire: hotkeyAction) }
             if blacked { scheduleGuards() }
-            log("配置已自动重载 热键=\(modsText(cfg.modFlags))\(keyName(cfg.keyCode))")
+            log((L("配置已自动重载 热键=") + "\(modsText(cfg.modFlags))" + "\(keyName(cfg.keyCode))"))
         }
         configMtime = m
     }
@@ -1244,13 +1256,13 @@ func runService(keyCode: Int64) -> Never {
         guard !blacked else { return true }
         restoreRetry?.invalidate(); restoreRetry = nil
         guard dsAvailable else {
-            return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
+            return reject(L("亮度接口不可用（DisplayServices 缺失），无法关屏"))
         }
         // 电量下限：关屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
         if cfg.batteryFloor > 0 {
             let b = batteryStatus()
             if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）")
+                return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消关屏（避免耗尽电池）")))
             }
         }
         try? fm.removeItem(atPath: rejectFile)
@@ -1258,7 +1270,7 @@ func runService(keyCode: Int64) -> Never {
         saved = cur > 0.001 ? cur : saved
         try? String(saved).write(toFile: stateFile, atomically: true, encoding: .utf8)
         blacked = true
-        if !setBrightness(0.0) { log("警告：首次设置亮度 0 失败") }
+        if !setBrightness(0.0) { log(L("警告：首次设置亮度 0 失败")) }
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         // -w 自身 pid：本进程退出后 caffeinate 自动退出，杜绝孤儿断言残留。
@@ -1272,7 +1284,7 @@ func runService(keyCode: Int64) -> Never {
             // 状态标记：本进程被 SIGKILL 时，recoverStaleNosleep 据此复位 disablesleep
             try? "system|\(Date().timeIntervalSince1970)|1"
                 .write(toFile: nosleepStateFile, atomically: true, encoding: .utf8)
-            log("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）")
+            log(L("nosleep: 关屏联动已开启系统级防睡眠（覆盖电池与合盖）"))
         }
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if blacked { setBrightness(0.0) }
@@ -1280,7 +1292,7 @@ func runService(keyCode: Int64) -> Never {
         RunLoop.main.add(t, forMode: .common)
         pinTimer = t
         scheduleGuards()
-        log("service 进入黑屏，原亮度 \(saved)，兜底 \(Int(cfg.timeout))s，电量下限 \(cfg.batteryFloor)%")
+        log((L("service 进入黑屏，原亮度 ") + "\(saved)" + L("，兜底 ") + "\(Int(cfg.timeout))" + L("s，电量下限 ") + "\(cfg.batteryFloor)" + "%"))
         return true
     }
 
@@ -1302,9 +1314,9 @@ func runService(keyCode: Int64) -> Never {
     signal(SIGINT)  { _ in cliSignalTerm = true }
     let sigTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
         reloadConfigIfChanged()
-        if cliSignalOff { cliSignalOff = false; log("收到 SIGUSR1"); blackout() }
-        if cliSignalOn  { cliSignalOn = false;  log("收到 SIGUSR2"); restore() }
-        if cliSignalTerm { log("收到终止信号"); shutdown() }
+        if cliSignalOff { cliSignalOff = false; log(L("收到 SIGUSR1")); blackout() }
+        if cliSignalOn  { cliSignalOn = false;  log(L("收到 SIGUSR2")); restore() }
+        if cliSignalTerm { log(L("收到终止信号")); shutdown() }
     }
     RunLoop.main.add(sigTimer, forMode: .common)
 
@@ -1318,7 +1330,7 @@ func servicePid() -> Int32? {
           kill(pid, 0) == 0 else { return nil }
     // pid 可能已被系统复用于无关进程：此时绝不能发信号（SIGUSR1 默认动作是终止）
     guard isOurs(pid) else {
-        log("service.pid 中的 pid=\(pid) 已不属于 blankscreen（pid 被复用），清理陈旧记录")
+        log((L("service.pid 中的 pid=") + "\(pid)" + L(" 已不属于 blankscreen（pid 被复用），清理陈旧记录")))
         try? fm.removeItem(atPath: serviceFile)
         return nil
     }
@@ -1330,7 +1342,7 @@ func daemonRunning() -> (pid: Int32, brightness: String)? {
           kill(pid, 0) == 0,
           let b = try? String(contentsOfFile: stateFile, encoding: .utf8) else { return nil }
     guard isOurs(pid) else {
-        log("daemon.pid 中的 pid=\(pid) 已不属于 blankscreen（pid 被复用），清理陈旧记录")
+        log((L("daemon.pid 中的 pid=") + "\(pid)" + L(" 已不属于 blankscreen（pid 被复用），清理陈旧记录")))
         try? fm.removeItem(atPath: pidFile)
         return nil
     }
@@ -1371,20 +1383,20 @@ func startOneShotDaemon(extra: [String]) -> Int32 {
     p.arguments = dargs
     p.standardOutput = nil; p.standardError = nil; p.standardInput = nil
     do { try p.run() } catch {
-        FileHandle.standardError.write("启动失败: \(error)\n".data(using: .utf8)!)
+        FileHandle.standardError.write((L("启动失败: ") + "\(error)" + "\n").data(using: .utf8)!)
         return 1
     }
     _ = waitUntil(timeout: 3.0) { daemonRunning() != nil }
     if let r = daemonRunning() {
-        print("已进入黑屏模式 pid=\(r.pid) 原亮度=\(r.brightness)")
-        print("恢复方式: 热键 \(modsText(loadConfig().modFlags))\(keyName(loadConfig().keyCode))  /  blankscreen on  /  远程执行同一命令")
+        print((L("已进入黑屏模式 pid=") + "\(r.pid)" + L(" 原亮度=") + "\(r.brightness)"))
+        print((L("恢复方式: 热键 ") + "\(modsText(loadConfig().modFlags))" + "\(keyName(loadConfig().keyCode))" + L("  /  blankscreen on  /  远程执行同一命令")))
         return 0
     }
     if let reason = rejectReason() {
-        FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
+        FileHandle.standardError.write((L("未能关屏：") + "\(reason)" + "\n").data(using: .utf8)!)
         return 1
     }
-    print("启动失败，请查看 \(logPath)")
+    print((L("启动失败，请查看 ") + "\(logPath)"))
     return 1
 }
 
@@ -1408,15 +1420,15 @@ func runDoctor() -> Int32 {
     var errors: [String] = []
     var warns: [String] = []
 
-    print("BlankScreen 诊断 —— v\(BS_VERSION) (\(BS_COMMIT))")
-    print("系统: \(ProcessInfo.processInfo.operatingSystemVersionString)")
+    print((L("BlankScreen 诊断 —— v") + "\(BS_VERSION)" + " (" + "\(BS_COMMIT)" + ")"))
+    print((L("系统: ") + "\(ProcessInfo.processInfo.operatingSystemVersionString)"))
 
-    print("\n【关屏能力】")
+    print(L("\n【关屏能力】"))
     if dsAvailable {
-        print("  ✅ 亮度接口 DisplayServices 可用，当前亮度 \(readBrightness())")
+        print((L("  ✅ 亮度接口 DisplayServices 可用，当前亮度 ") + "\(readBrightness())"))
     } else {
-        errors.append("DisplayServices 不可用")
-        print("  ❌ 亮度接口不可用：本 macOS 可能已移除该私有框架，关屏功能整体失效")
+        errors.append(L("DisplayServices 不可用"))
+        print(L("  ❌ 亮度接口不可用：本 macOS 可能已移除该私有框架，关屏功能整体失效"))
     }
     for id in onlineDisplays() {
         var v: Float = -1
@@ -1424,110 +1436,111 @@ func runDoctor() -> Int32 {
         if let h = dsHandle, let p = dlsym(h, "DisplayServicesGetBrightness") {
             ok = unsafeBitCast(p, to: DSGet.self)(id, &v) == 0
         }
-        let tag = id == CGMainDisplayID() ? "主显示器" : "外接显示器"
+        let tag = id == CGMainDisplayID() ? L("主显示器") : L("外接显示器")
         if ok {
-            print("  ✅ \(tag) id=\(id) 亮度 \(String(format: "%.3f", v))（可用亮度归零关闭）")
+            print(("  ✅ " + "\(tag)" + " id=" + "\(id)" + L(" 亮度 ") + "\(String(format: "%.3f", v))" + L("（可用亮度归零关闭）")))
         } else {
-            warns.append("显示器 \(id) 不支持软件亮度")
-            print("  ⚠️  \(tag) id=\(id) 不支持软件亮度控制（HDMI/DVI/DP 外接屏常见），关屏时这块屏不会熄灭")
+            warns.append((L("显示器 ") + "\(id)" + L(" 不支持软件亮度")))
+            print(("  ⚠️  " + "\(tag)" + " id=" + "\(id)" + L(" 不支持软件亮度控制（HDMI/DVI/DP 外接屏常见），关屏时这块屏不会熄灭")))
         }
     }
 
-    print("\n【配置】\(configFile)")
+    print((L("\n【配置】") + "\(configFile)"))
     let c = loadConfig()
-    print("  热键 \(modsText(c.modFlags))\(keyName(c.keyCode))　兜底 \(Int(c.timeout))s　"
-          + "电量下限 \(c.batteryFloor)%　关屏联动防睡眠 \(c.autoNosleep ? "开" : "关")")
+    print((L("  热键 ") + "\(modsText(c.modFlags))" + "\(keyName(c.keyCode))" + L("　兜底 ") + "\(Int(c.timeout))" + L("s　"))
+          + (L("电量下限 ") + "\(c.batteryFloor)" + L("%　关屏联动防睡眠 ") + "\(c.autoNosleep ? L("开") : L("关"))"))
     if c.modFlags == 0 {
-        errors.append("热键无修饰键")
-        print("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（blankscreen config --mods cmd,shift --key 0）")
+        errors.append(L("热键无修饰键"))
+        print(L("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（blankscreen config --mods cmd,shift --key 0）"))
     }
 
-    print("\n【常驻进程】")
+    print(L("\n【常驻进程】"))
     if let pid = servicePid() {
-        print("  ✅ 常驻服务运行中 pid=\(pid)，\(fm.fileExists(atPath: stateFile) ? "当前黑屏中" : "当前正常显示")")
+        print((L("  ✅ 常驻服务运行中 pid=") + "\(pid)" + L("，") + "\(fm.fileExists(atPath: stateFile) ? L("当前黑屏中") : L("当前正常显示"))"))
     } else if let r = daemonRunning() {
-        print("  ✅ 一次性黑屏 daemon pid=\(r.pid)，待恢复亮度 \(r.brightness)")
+        print((L("  ✅ 一次性黑屏 daemon pid=") + "\(r.pid)" + L("，待恢复亮度 ") + "\(r.brightness)"))
     } else {
-        warns.append("无常驻进程")
-        print("  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕")
-        print("     → 启动菜单栏 App，或安装 CLI 常驻服务（blankscreen service install）")
+        warns.append(L("无常驻进程"))
+        print(L("  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕"))
+        print(L("     → 启动菜单栏 App，或安装 CLI 常驻服务（blankscreen service install）"))
     }
     if fm.fileExists(atPath: serviceFile) && servicePid() == nil {
-        warns.append("service.pid 陈旧")
-        print("  ⚠️  service.pid 指向已不存在的进程（上次异常退出），下次启动会自动清理")
+        warns.append(L("service.pid 陈旧"))
+        print(L("  ⚠️  service.pid 指向已不存在的进程（上次异常退出），下次启动会自动清理"))
     }
     if fm.fileExists(atPath: stateFile), servicePid() == nil, daemonRunning() == nil {
-        errors.append("残留黑屏状态")
-        print("  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着")
-        print("     → 执行 `blankscreen on` 恢复，或重启菜单栏 App 自动自愈")
+        errors.append(L("残留黑屏状态"))
+        print(L("  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着"))
+        print(L("     → 执行 `blankscreen on` 恢复，或重启菜单栏 App 自动自愈"))
     }
 
-    print("\n【开机自启】")
+    print(L("\n【开机自启】"))
     let bar = runProbe("com.blankscreen.bar")
     let agent = runProbe(label)
-    print("  菜单栏 App: \(bar ? "✅ 已注册" : "未注册（设置里勾选「登录时启动」）")")
-    print("  CLI 常驻服务: \(agent ? "已注册" : "未注册")")
+    print((L("  菜单栏 App: ") + "\(bar ? L("✅ 已注册") : L("未注册（设置里勾选「登录时启动」）"))"))
+    print((L("  CLI 常驻服务: ") + "\(agent ? L("已注册") : L("未注册"))"))
     if bar && agent {
-        warns.append("双常驻")
-        print("  ⚠️  两者同时注册会互相抢占状态，建议只保留菜单栏 App")
+        warns.append(L("双常驻"))
+        print(L("  ⚠️  两者同时注册会互相抢占状态，建议只保留菜单栏 App"))
     }
 
-    print("\n【防睡眠】")
+    print(L("\n【防睡眠】"))
     let b = batteryStatus()
-    print("  电源: \(b.onBattery ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")" : "电源适配器")")
+    let pwrText = b.onBattery ? (L("电池 ") + "\(b.percent)" + "%" + (b.discharging ? L("（放电中）") : "")) : L("电源适配器")
+    print(L("  电源: ") + pwrText)
     if helperInstalled() {
-        print("  ✅ 提权助手已安装")
+        print(L("  ✅ 提权助手已安装"))
         if let d = helperExec("detect") { print("     \(d)") }
         if helperOutdated() {
-            warns.append("提权助手过旧")
-            print("  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方")
-            print("     → 重新安装：blankscreen nosleep install-helper --force（需输入一次密码）")
+            warns.append(L("提权助手过旧"))
+            print(L("  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方"))
+            print(L("     → 重新安装：blankscreen nosleep install-helper --force（需输入一次密码）"))
         }
-        print("  系统级开关: \(systemSleepDisabled() ? "开启（系统当前不会睡眠）" : "关闭")")
-        if let pid = nosleepPid() { print("  守护进程: 运行中 pid=\(pid)") }
+        print((L("  系统级开关: ") + "\(systemSleepDisabled() ? L("开启（系统当前不会睡眠）") : L("关闭"))"))
+        if let pid = nosleepPid() { print((L("  守护进程: 运行中 pid=") + "\(pid)")) }
         else if systemSleepDisabled() {
             if let app = thirdPartySleepHolder() {
-                print("  ℹ️ 无本程序守护，但检测到远控软件 \(app) 在运行——系统级开关由其持有以保持远程可用，属正常共存，无需处理")
+                print((L("  ℹ️ 无本程序守护，但检测到远控软件 ") + "\(app)" + L(" 在运行——系统级开关由其持有以保持远程可用，属正常共存，无需处理")))
             } else {
-                errors.append("disablesleep 残留")
-                print("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位")
+                errors.append(L("disablesleep 残留"))
+                print(L("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位"))
             }
         }
     } else {
-        print("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠")
-        print("     → 一键安装：blankscreen nosleep setup")
+        print(L("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠"))
+        print(L("     → 一键安装：blankscreen nosleep setup"))
     }
 
-    print("\n【合盖检测】")
+    print(L("\n【合盖检测】"))
     let lid = SMCLid()
     if lid.open(), let closed = lid.lidClosed() {
-        print("  ✅ SMC 合盖检测可用（MSLD），当前：\(closed ? "已合盖" : "开盖")")
-        print("     防睡眠运行期间合盖会自动熄灭内屏，开盖自动恢复")
+        print((L("  ✅ SMC 合盖检测可用（MSLD），当前：") + "\(closed ? L("已合盖") : L("开盖"))"))
+        print(L("     防睡眠运行期间合盖会自动熄灭内屏，开盖自动恢复"))
         lid.close()
     } else {
-        print("  ⚠️  SMC 合盖检测不可用（台式机 / 虚拟机属正常；合盖熄屏功能将自动禁用）")
+        print(L("  ⚠️  SMC 合盖检测不可用（台式机 / 虚拟机属正常；合盖熄屏功能将自动禁用）"))
     }
 
-    print("\n【残留进程】")
+    print(L("\n【残留进程】"))
     let orphans = orphanCaffeinate()
     if orphans.isEmpty {
-        print("  ✅ 无孤儿 caffeinate")
+        print(L("  ✅ 无孤儿 caffeinate"))
     } else {
-        warns.append("孤儿 caffeinate")
+        warns.append(L("孤儿 caffeinate"))
         for o in orphans {
-            print("  ⚠️  caffeinate pid=\(o) 的父进程已不存在，属崩溃残留：kill \(o)")
+            print(("  ⚠️  caffeinate pid=" + "\(o)" + L(" 的父进程已不存在，属崩溃残留：kill ") + "\(o)"))
         }
     }
 
     print("")
     if !errors.isEmpty {
-        print("结论：❌ \(errors.count) 个问题需要修复 —— \(errors.joined(separator: "；"))")
+        print((L("结论：❌ ") + "\(errors.count)" + L(" 个问题需要修复 —— ") + "\(errors.joined(separator: L("；")))"))
     } else if !warns.isEmpty {
-        print("结论：⚠️  \(warns.count) 项提示（不影响基本使用）")
+        print((L("结论：⚠️  ") + "\(warns.count)" + L(" 项提示（不影响基本使用）")))
     } else {
-        print("结论：✅ 一切正常")
+        print(L("结论：✅ 一切正常"))
     }
-    print("日志：\(logPath)")
+    print((L("日志：") + "\(logPath)"))
     return errors.isEmpty ? 0 : 1
 }
 
@@ -1554,10 +1567,10 @@ case "service":
     case "install":
         // 菜单栏 App 已注册为常驻服务时，CLI 服务不再安装（功能完全重叠，会互相抢状态）
         if runProbe("com.blankscreen.bar") {
-            print("检测到菜单栏 App（BlankScreenBar）已注册为常驻服务。")
-            print("两者功能完全重叠，同时运行会互相抢占状态。")
-            print("→ 建议：直接使用菜单栏 App，无需安装本 CLI 服务。")
-            print("→ 如确实要改用 CLI 服务，请先在菜单栏设置中关闭「登录时启动」。")
+            print(L("检测到菜单栏 App（BlankScreenBar）已注册为常驻服务。"))
+            print(L("两者功能完全重叠，同时运行会互相抢占状态。"))
+            print(L("→ 建议：直接使用菜单栏 App，无需安装本 CLI 服务。"))
+            print(L("→ 如确实要改用 CLI 服务，请先在菜单栏设置中关闭「登录时启动」。"))
             exit(1)
         }
         let exe = exePath
@@ -1584,35 +1597,50 @@ case "service":
         sh("/bin/launchctl", ["kickstart", "-k", "\(gui)/\(label)"])
         usleep(900_000)
         if let pid = servicePid() {
-            print("常驻服务已启动 pid=\(pid)")
-            print("  热键 ⌃⌥⌘B 直接开关；也可用 blankscreen off / on")
-            print("  开机自启，日志: \(serviceLog)")
+            print((L("常驻服务已启动 pid=") + "\(pid)"))
+            print(L("  热键 ⌃⌥⌘B 直接开关；也可用 blankscreen off / on"))
+            print((L("  开机自启，日志: ") + "\(serviceLog)"))
         } else {
-            print("""
-            plist 已写入: \(plistFile)
-            但当前环境无法与 launchd 通信（被沙箱或自动化环境调用时常见）。
+            let plistBody: String
+            if L10n.isEN {
+                plistBody = """
+                plist written: \(plistFile)
+                but this environment cannot talk to launchd (common when invoked from a sandbox or automation).
 
-            请在「终端」里手动执行:
-              blankscreen service install
+                Run this manually in Terminal:
+                  blankscreen service install
 
-            临时常驻（不依赖 launchd，重启后失效）:
-              nohup blankscreen daemon --service >/dev/null 2>&1 &
-            """)
+                Temporary resident mode (no launchd, lost after reboot):
+                  nohup blankscreen daemon --service >/dev/null 2>&1 &
+                """
+            } else {
+                plistBody = """
+                plist 已写入: \(plistFile)
+                但当前环境无法与 launchd 通信（被沙箱或自动化环境调用时常见）。
+
+                请在「终端」里手动执行:
+                  blankscreen service install
+
+                临时常驻（不依赖 launchd，重启后失效）:
+                  nohup blankscreen daemon --service >/dev/null 2>&1 &
+                """
+            }
+            print(plistBody)
         }
     case "uninstall":
         sh("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"])
         sh("/bin/launchctl", ["unload", plistFile])
         try? fm.removeItem(atPath: plistFile)
         try? fm.removeItem(atPath: serviceFile)
-        print("常驻服务已卸载")
+        print(L("常驻服务已卸载"))
     case "status":
         if let pid = servicePid() {
-            print("常驻服务: 运行中 pid=\(pid)，\(fm.fileExists(atPath: stateFile) ? "当前黑屏中" : "当前正常显示")")
+            print((L("常驻服务: 运行中 pid=") + "\(pid)" + L("，") + "\(fm.fileExists(atPath: stateFile) ? L("当前黑屏中") : L("当前正常显示"))"))
         } else {
-            print("常驻服务: 未运行（用 `blankscreen service install` 启用）")
+            print(L("常驻服务: 未运行（用 `blankscreen service install` 启用）"))
         }
     default:
-        print("用法: blankscreen service install | uninstall | status")
+        print(L("用法: blankscreen service install | uninstall | status"))
     }
 
 // MARK: - 防睡眠
@@ -1634,7 +1662,7 @@ case "nosleep":
     case "on":
         recoverStaleNosleep()
         if let pid = nosleepPid() {
-            print("防睡眠已在运行 pid=\(pid)（用 `blankscreen nosleep off` 关闭）")
+            print((L("防睡眠已在运行 pid=") + "\(pid)" + L("（用 `blankscreen nosleep off` 关闭）")))
             exit(0)
         }
         var wantSystem = false
@@ -1650,82 +1678,82 @@ case "nosleep":
         if cfg.batteryFloor > 0 {
             let b = batteryStatus()
             if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                let m = "电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消开启防睡眠（避免耗尽电池）"
+                let m = (L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消开启防睡眠（避免耗尽电池）"))
                 FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
                 log(m); notify(m)
                 exit(1)
             }
         }
         if wantSystem && !helperInstalled() {
-            print("提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。")
-            print("      本次按 Level 1 开启——仅在接电源时有效。")
-            print("      一键安装：`blankscreen nosleep setup`（会弹系统密码框）")
+            print(L("提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。"))
+            print(L("      本次按 Level 1 开启——仅在接电源时有效。"))
+            print(L("      一键安装：`blankscreen nosleep setup`（会弹系统密码框）"))
             wantSystem = false
         }
         if let (pid, info) = spawnNosleepDaemon(wantSystem: wantSystem, timeout: nsTimeout) {
-            print("防睡眠已开启 pid=\(pid)")
-            print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
+            print((L("防睡眠已开启 pid=") + "\(pid)"))
+            print((L("  层级: ") + "\(info.level == "system" ? L("系统级（含电池与合盖）") : L("进程级（仅电源适配器）"))"))
             let b = batteryStatus()
-            print("  电源: \(b.onBattery ? "电池 \(b.percent)%" : "电源适配器")")
-            if let t = nsTimeout { print("  时长: \(Int(t)) 秒后自动停止") }
-            print("  关闭: blankscreen nosleep off")
+            print((L("  电源: ") + "\(b.onBattery ? (L("电池 ") + "\(b.percent)" + "%") : L("电源适配器"))"))
+            if let t = nsTimeout { print((L("  时长: ") + "\(Int(t))" + L(" 秒后自动停止"))) }
+            print(L("  关闭: blankscreen nosleep off"))
         } else {
-            print("已启动但未确认，请查看 \(logPath)")
+            print((L("已启动但未确认，请查看 ") + "\(logPath)"))
             exit(1)
         }
 
     case "setup":
         // 一键到位：装助手 → 开关屏联动 → 立即开启系统级防睡眠。每一步幂等，可重复执行。
-        print("BlankScreen 一键防睡眠")
+        print(L("BlankScreen 一键防睡眠"))
         if helperInstalled(), !helperOutdated() {
-            print("① 提权助手已安装，跳过")
+            print(L("① 提权助手已安装，跳过"))
         } else {
             print(helperOutdated()
-                  ? "① 提权助手版本过旧，重新安装（macOS 将弹出密码框）…"
-                  : "① 安装提权助手（macOS 将弹出密码框）…")
+                  ? L("① 提权助手版本过旧，重新安装（macOS 将弹出密码框）…")
+                  : L("① 安装提权助手（macOS 将弹出密码框）…"))
             let (ok, out) = runAsAdmin(installHelperScript(NSUserName()))
             guard ok else {
-                print("   安装失败: \(out)")
-                print("   提示：取消密码框会中止安装，可重新运行本命令。")
+                print((L("   安装失败: ") + "\(out)"))
+                print(L("   提示：取消密码框会中止安装，可重新运行本命令。"))
                 exit(1)
             }
             if helperOutdated() {
-                print("   ⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行")
+                print(L("   ⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行"))
                 exit(1)
             }
-            print("   完成（电池与合盖现已可防睡眠）")
+            print(L("   完成（电池与合盖现已可防睡眠）"))
         }
         var sc = loadConfig()
         if sc.autoNosleep {
-            print("② 关屏联动防睡眠：已开启")
+            print(L("② 关屏联动防睡眠：已开启"))
         } else {
             sc.autoNosleep = true
             saveConfig(sc)
-            print("② 已开启「关屏时联动防睡眠」，恢复显示时自动复位")
+            print(L("② 已开启「关屏时联动防睡眠」，恢复显示时自动复位"))
         }
         if servicePid() != nil {
-            print("③ 常驻服务运行中：防睡眠将随黑屏自动联动，也可在菜单栏单独开关")
+            print(L("③ 常驻服务运行中：防睡眠将随黑屏自动联动，也可在菜单栏单独开关"))
         } else if nosleepPid() != nil {
-            print("③ 防睡眠守护已在运行")
+            print(L("③ 防睡眠守护已在运行"))
         } else {
             var skipForBattery = false
             if sc.batteryFloor > 0 {
                 let b = batteryStatus()
                 skipForBattery = b.onBattery && b.discharging && b.percent <= sc.batteryFloor
                 if skipForBattery {
-                    print("③ 电量 \(b.percent)% 低于下限 \(sc.batteryFloor)%，跳过立即开启（黑屏联动在接电后仍会生效）")
+                    print((L("③ 电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(sc.batteryFloor)" + L("%，跳过立即开启（黑屏联动在接电后仍会生效）")))
                 }
             }
             if !skipForBattery {
-                print("③ 立即开启系统级防睡眠…")
+                print(L("③ 立即开启系统级防睡眠…"))
                 if let (pid, info) = spawnNosleepDaemon(wantSystem: true, timeout: nil) {
-                    print("   已开启 pid=\(pid)，层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
+                    print((L("   已开启 pid=") + "\(pid)" + L("，层级: ") + "\(info.level == "system" ? L("系统级（含电池与合盖）") : L("进程级（仅电源适配器）"))"))
                 } else {
-                    print("   启动未确认，请查看 \(logPath)")
+                    print((L("   启动未确认，请查看 ") + "\(logPath)"))
                 }
             }
         }
-        print("✅ 一键配置完成。查看状态: blankscreen nosleep status")
+        print(L("✅ 一键配置完成。查看状态: blankscreen nosleep status"))
 
     case "off":
         // 无论守护是否在跑，「off」都表达「不再需要防睡眠」——持久标志必须一起清
@@ -1733,51 +1761,52 @@ case "nosleep":
         guard let pid = nosleepPid() else {
             // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
             recoverStaleNosleep()
-            print("防睡眠未在运行")
+            print(L("防睡眠未在运行"))
             exit(0)
         }
         try? fm.removeItem(atPath: nosleepStateFile)
         kill(pid, SIGTERM)
         let gone = waitUntil(timeout: 5.0) { nosleepPid() == nil }
-        print(gone ? "防睡眠已关闭" : "已发送停止指令（5s 内未确认，请查看 \(logPath)）")
+        print(gone ? L("防睡眠已关闭") : (L("已发送停止指令（5s 内未确认，请查看 ") + "\(logPath)" + L("）")))
         if !gone { exit(1) }
 
     case "status":
         let b = batteryStatus()
         let helper = helperInstalled()
-        print("防睡眠: \(nosleepPid() != nil ? "已开启" : "未开启")")
-        print("  合盖模式: \(loadConfig().lidAwake ? "开（重启后自动恢复）" : "关")（菜单栏 App 可一键开关）")
+        print((L("防睡眠: ") + "\(nosleepPid() != nil ? L("已开启") : L("未开启"))"))
+        print((L("  合盖模式: ") + "\(loadConfig().lidAwake ? L("开（重启后自动恢复）") : L("关"))" + L("（菜单栏 App 可一键开关）")))
         if loadConfig().lidAwake, nosleepPid() != nil {
             let lid = SMCLid()
             if lid.open(), let closed = lid.lidClosed() {
-                print("  内屏: \(closed ? "已合盖（已自动熄灭）" : "开盖")，SMC 合盖检测正常")
+                print((L("  内屏: ") + "\(closed ? L("已合盖（已自动熄灭）") : L("开盖"))" + L("，SMC 合盖检测正常")))
                 lid.close()
             } else {
-                print("  ⚠️ SMC 合盖检测不可用，合盖自动熄屏已禁用（台式机/虚拟机属正常）")
+                print(L("  ⚠️ SMC 合盖检测不可用，合盖自动熄屏已禁用（台式机/虚拟机属正常）"))
             }
         }
         if let info = nosleepInfo() {
             let mins = Int(Date().timeIntervalSince(info.since) / 60)
-            print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
-            print("  已持续: \(mins / 60) 小时 \(mins % 60) 分钟")
+            print((L("  层级: ") + "\(info.level == "system" ? L("系统级（含电池与合盖）") : L("进程级（仅电源适配器）"))"))
+            print((L("  已持续: ") + "\(mins / 60)" + L(" 小时 ") + "\(mins % 60)" + L(" 分钟")))
         }
-        print("  电源: \(b.onBattery ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")" : "电源适配器")")
-        print("  提权助手: \(helper ? "已安装" : "未安装（电池 / 合盖防睡眠不可用）")")
+        let pwrText2 = b.onBattery ? (L("电池 ") + "\(b.percent)" + "%" + (b.discharging ? L("（放电中）") : "")) : L("电源适配器")
+        print(L("  电源: ") + pwrText2)
+        print((L("  提权助手: ") + "\(helper ? L("已安装") : L("未安装（电池 / 合盖防睡眠不可用）"))"))
         if helper {
-            print("  系统级开关: \(systemSleepDisabled() ? "开启（系统不会睡眠）" : "关闭")")
+            print((L("  系统级开关: ") + "\(systemSleepDisabled() ? L("开启（系统不会睡眠）") : L("关闭"))"))
         }
         if nosleepPid() == nil && helper && systemSleepDisabled() {
             if let app = thirdPartySleepHolder() {
-                print("  ℹ️ 系统级开关由远控软件 \(app) 持有（保持远程可用），与本程序共存，无需处理")
+                print((L("  ℹ️ 系统级开关由远控软件 ") + "\(app)" + L(" 持有（保持远程可用），与本程序共存，无需处理")))
             } else {
-                print("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位")
+                print(L("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位"))
             }
         }
 
     case "detect":
         // 只读探测，不改任何状态
-        guard helperInstalled() else { print("提权助手未安装"); exit(1) }
-        print(helperExec("detect") ?? "探测失败（sudo 免密授权可能失效，重新安装助手可修复）")
+        guard helperInstalled() else { print(L("提权助手未安装")); exit(1) }
+        print(helperExec("detect") ?? L("探测失败（sudo 免密授权可能失效，重新安装助手可修复）"))
 
     case "install-helper":
         // --dry-run：把将要交给 root 执行的脚本完整打印出来供审计。
@@ -1788,34 +1817,34 @@ case "nosleep":
         }
         // 旧版助手缺少持有者记账，必须允许覆盖安装，否则用户永远升不了级
         if helperInstalled(), !args.contains("--force") {
-            print("提权助手已安装，无需重复操作（加 --force 可覆盖安装 / 升级）")
+            print(L("提权助手已安装，无需重复操作（加 --force 可覆盖安装 / 升级）"))
             exit(0)
         }
-        print("将安装一个仅允许「\(NSUserName())」以 root 执行 \(helperPath)")
-        print("（四个固定参数：on / off / status / detect）的授权条目。")
-        print("macOS 会弹出密码框，请输入你的登录密码。")
+        print((L("将安装一个仅允许「") + "\(NSUserName())" + L("」以 root 执行 ") + "\(helperPath)"))
+        print(L("（四个固定参数：on / off / status / detect）的授权条目。"))
+        print(L("macOS 会弹出密码框，请输入你的登录密码。"))
         let (ok, out) = runAsAdmin(installHelperScript(NSUserName()))
-        print(ok ? "安装完成" : "安装失败: \(out)")
+        print(ok ? L("安装完成") : (L("安装失败: ") + "\(out)"))
         if ok {
-            if let d = helperExec("detect") { print("disablesleep 支持情况: \(d)") }
+            if let d = helperExec("detect") { print((L("disablesleep 支持情况: ") + "\(d)")) }
             // 装后校验：提权链路（密码框 + root 脚本）环节多，必须回读真实结果，
             // 不能让「命令成功但助手没装上」的静默失败溜过去
             if helperOutdated() {
-                print("⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行")
+                print(L("⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行"))
                 exit(1)
             }
-            if !systemSleepDisabled() { print("当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）") }
+            if !systemSleepDisabled() { print(L("当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）")) }
         }
         exit(ok ? 0 : 1)
 
     case "uninstall-helper":
-        if !helperInstalled() { print("提权助手未安装"); exit(0) }
+        if !helperInstalled() { print(L("提权助手未安装")); exit(0) }
         // 先关掉正在运行的防睡眠，再卸载（顺序反了就再也无法复位）
         if let pid = nosleepPid() { kill(pid, SIGTERM); _ = waitUntil(timeout: 5.0) { nosleepPid() == nil } }
         let (ok, out) = runAsAdmin(uninstallHelperScript())
         try? fm.removeItem(atPath: nosleepPidFile)
         try? fm.removeItem(atPath: nosleepStateFile)
-        print(ok ? "已卸载提权助手，并已复位系统睡眠设置" : "卸载失败: \(out)")
+        print(ok ? L("已卸载提权助手，并已复位系统睡眠设置") : (L("卸载失败: ") + "\(out)"))
         exit(ok ? 0 : 1)
 
     case "write-assets":
@@ -1825,19 +1854,33 @@ case "nosleep":
         do {
             try helperScript.write(toFile: dir + "/com.blankscreen.pmset", atomically: true, encoding: .utf8)
             try resetPlist.write(toFile: dir + "/com.blankscreen.nosleep.reset.plist", atomically: true, encoding: .utf8)
-            print("已写出资产到 \(dir)")
-        } catch { print("写出失败: \(error)"); exit(1) }
+            print((L("已写出资产到 ") + "\(dir)"))
+        } catch { print((L("写出失败: ") + "\(error)")); exit(1) }
 
     default:
-        print("""
-        用法: blankscreen nosleep <子命令>
-          setup                         一键到位：装助手 + 开关屏联动 + 立即防睡眠
-          on [--system] [--timeout 秒]   开启防睡眠（--system 覆盖电池与合盖，需先装助手）
-          off                           关闭防睡眠，并复位系统级设置
-          status                        查看层级、电量、助手安装状态
-          install-helper                安装提权助手（弹系统密码框，仅授权单个脚本）
-          uninstall-helper              卸载助手并复位系统睡眠设置
-        """)
+        let nosleepHelp: String
+        if L10n.isEN {
+            nosleepHelp = """
+            Usage: blankscreen nosleep <subcommand>
+              setup                         All-in-one: install helper + link to blanking + start anti-sleep
+              on [--system] [--timeout S]   Enable anti-sleep (--system covers battery and closed lid; needs the helper)
+              off                           Disable anti-sleep and reset the system-level setting
+              status                        Show level, battery and helper state
+              install-helper                Install the privileged helper (one system password prompt, single script)
+              uninstall-helper              Remove the helper and reset system sleep settings
+            """
+        } else {
+            nosleepHelp = """
+            用法: blankscreen nosleep <子命令>
+              setup                         一键到位：装助手 + 开关屏联动 + 立即防睡眠
+              on [--system] [--timeout 秒]   开启防睡眠（--system 覆盖电池与合盖，需先装助手）
+              off                           关闭防睡眠，并复位系统级设置
+              status                        查看层级、电量、助手安装状态
+              install-helper                安装提权助手（弹系统密码框，仅授权单个脚本）
+              uninstall-helper              卸载助手并复位系统睡眠设置
+            """
+        }
+        print(nosleepHelp)
     }
 
 case "config":
@@ -1846,13 +1889,13 @@ case "config":
     while i < args.count {
         if args[i] == "--key", i + 1 < args.count {
             guard let k = Int64(args[i + 1]), (0...127).contains(k) else {
-                print("错误：--key 需要 0-127 的虚拟键码，收到: \(args[i + 1])"); exit(1)
+                print((L("错误：--key 需要 0-127 的虚拟键码，收到: ") + "\(args[i + 1])")); exit(1)
             }
             c.keyCode = k; i += 2
         }
         else if args[i] == "--timeout", i + 1 < args.count {
             guard let t = Double(args[i + 1]), t >= 0 else {
-                print("错误：--timeout 需要非负秒数（0 = 不启用兜底），收到: \(args[i + 1])"); exit(1)
+                print((L("错误：--timeout 需要非负秒数（0 = 不启用兜底），收到: ") + "\(args[i + 1])")); exit(1)
             }
             c.timeout = t; i += 2
         }
@@ -1876,7 +1919,7 @@ case "config":
             } else if let f = Float(v), (0...1).contains(f) {
                 c.restoreFixed = f
             } else {
-                print("错误：--restore 需要 original（关屏前亮度）或 0.0-1.0 的数值，收到: \(args[i + 1])")
+                print((L("错误：--restore 需要 original（关屏前亮度）或 0.0-1.0 的数值，收到: ") + "\(args[i + 1])"))
                 exit(1)
             }
             i += 2
@@ -1885,11 +1928,18 @@ case "config":
             if let v = Int(args[i + 1]), (0...100).contains(v) {
                 c.batteryFloor = v
             } else {
-                print("错误：--battery 需要 0-100 的整数（0 = 不限制），收到: \(args[i + 1])"); exit(1)
+                print((L("错误：--battery 需要 0-100 的整数（0 = 不限制），收到: ") + "\(args[i + 1])")); exit(1)
             }
             i += 2
         }
         else if args[i] == "--auto-nosleep" { c.autoNosleep = true; i += 1 }
+        else if args[i] == "--lang", i + 1 < args.count {
+            let v = args[i + 1].lowercased()
+            guard ["auto", "zh", "en"].contains(v) else {
+                print((L("错误：--lang 需要 auto（跟随系统）/ zh / en，收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            c.lang = v; i += 2
+        }
         else if args[i] == "--no-auto-nosleep" { c.autoNosleep = false; i += 1 }
         else if args[i] == "--reset" { c = Config(); i += 1 }
         else { i += 1 }
@@ -1897,22 +1947,24 @@ case "config":
     // 热键必须带至少一个修饰键：Carbon RegisterEventHotKey 对无修饰键组合必定注册失败，
     // 存下来只会让热键静默失效（与菜单栏 App 的约束保持一致）。
     if args.count > 2 && c.modFlags == 0 {
-        print("错误：全局热键必须包含至少一个修饰键，否则系统无法注册（会静默失效）。")
-        print("示例: blankscreen config --mods cmd,shift --key 0")
+        print(L("错误：全局热键必须包含至少一个修饰键，否则系统无法注册（会静默失效）。"))
+        print(L("示例: blankscreen config --mods cmd,shift --key 0"))
         exit(1)
     }
-    if args.count > 2 { saveConfig(c); print("配置已保存: \(configFile)") }
+    if args.count > 2 { saveConfig(c); print((L("配置已保存: ") + "\(configFile)")) }
     var m = ""
     if c.modFlags & MOD_CTRL  != 0 { m += "⌃" }
     if c.modFlags & MOD_ALT   != 0 { m += "⌥" }
     if c.modFlags & MOD_SHIFT != 0 { m += "⇧" }
     if c.modFlags & MOD_CMD   != 0 { m += "⌘" }
-    print("  热键: \(m)\(keyName(c.keyCode))   (keyCode \(c.keyCode), mods \(c.modFlags))")
-    print("  一次性模式超时: \(Int(c.timeout)) 秒（\(String(format: "%.1f", c.timeout / 3600)) 小时，0 = 不限）")
-    print("  恢复亮度: \(c.restoreFixed.map { String(format: "固定 %.0f%%", $0 * 100) } ?? "进入黑屏前的亮度")")
-    print("  电量下限: \(c.batteryFloor > 0 ? "\(c.batteryFloor)%（电池供电且放电时，低于此值拒绝关屏并自动恢复）" : "不限制")")
-    print("  关屏联动防睡眠: \(c.autoNosleep ? "开（黑屏期间阻止系统睡眠，恢复显示时自动复位）" : "关")")
-    print("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep")
+    print(L("  热键: ") + "\(m)\(keyName(c.keyCode))   (keyCode \(c.keyCode), mods \(c.modFlags))")
+    print((L("  一次性模式超时: ") + "\(Int(c.timeout))" + L(" 秒（") + "\(String(format: "%.1f", c.timeout / 3600))" + L(" 小时，0 = 不限）")))
+    print((L("  恢复亮度: ") + "\(c.restoreFixed.map { String(format: L("固定 %.0f%%"), $0 * 100) } ?? L("进入黑屏前的亮度"))"))
+    print((L("  电量下限: ") + "\(c.batteryFloor > 0 ? ("\(c.batteryFloor)" + L("%（电池供电且放电时，低于此值拒绝关屏并自动恢复）")) : L("不限制"))"))
+    print((L("  关屏联动防睡眠: ") + "\(c.autoNosleep ? L("开（黑屏期间阻止系统睡眠，恢复显示时自动复位）") : L("关"))"))
+    let langName = c.lang == "auto" ? L("跟随系统") : (c.lang == "zh" ? L("中文") : L("英文"))
+    print((L("  界面语言: ") + "\(langName)" + L("（--lang auto/zh/en）")))
+    print(L("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep"))
 
 case "off":
     if let pid = servicePid() {                      // 常驻模式：命令文件 + 信号双通道
@@ -1922,15 +1974,15 @@ case "off":
         // 轮询等待：要么进入黑屏（stateFile），要么被拒绝（rejectFile）
         let ok = waitUntil(timeout: 3.0) { fm.fileExists(atPath: stateFile) || fm.fileExists(atPath: rejectFile) }
         if let reason = rejectReason() {
-            FileHandle.standardError.write("未能关屏：\(reason)\n".data(using: .utf8)!)
+            FileHandle.standardError.write((L("未能关屏：") + "\(reason)" + "\n").data(using: .utf8)!)
             exit(1)
         }
         print(ok
-              ? "已进入黑屏（常驻服务 pid=\(pid)）恢复: 热键或 blankscreen on"
-              : "已发送进入黑屏指令（3s 内未确认，请查看 \(logPath)）")
+              ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）恢复: 热键或 blankscreen on"))
+              : (L("已发送进入黑屏指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
         exit(0)
     }
-    if let r = daemonRunning() { print("已在黑屏模式 (pid \(r.pid))，原亮度 \(r.brightness)"); exit(0) }
+    if let r = daemonRunning() { print((L("已在黑屏模式 (pid ") + "\(r.pid)" + L(")，原亮度 ") + "\(r.brightness)")); exit(0) }
     var extra: [String] = []                          // 一次性模式
     var i = 2
     while i < args.count { extra.append(args[i]); i += 1 }
@@ -1941,35 +1993,35 @@ case "on":
         try? "on".write(toFile: commandFile, atomically: true, encoding: .utf8)
         kill(pid, SIGUSR2)
         let ok = waitUntil(timeout: 3.0) { !fm.fileExists(atPath: stateFile) }
-        print(ok ? "已恢复显示" : "恢复指令已发送（3s 内仍在黑屏，请查看 \(logPath)）")
+        print(ok ? L("已恢复显示") : (L("恢复指令已发送（3s 内仍在黑屏，请查看 ") + "\(logPath)" + L("）")))
         exit(0)
     }
-    guard let r = daemonRunning() else { print("当前不在黑屏模式"); exit(0) }
+    guard let r = daemonRunning() else { print(L("当前不在黑屏模式")); exit(0) }
     kill(r.pid, SIGTERM)
     _ = waitUntil(timeout: 3.0) { daemonRunning() == nil }
-    print("已恢复显示，亮度 \(r.brightness)，当前实际亮度 \(readBrightness())")
+    print((L("已恢复显示，亮度 ") + "\(r.brightness)" + L("，当前实际亮度 ") + "\(readBrightness())"))
 
 case "status":
     let cfg = loadConfig()
     let b = batteryStatus()
     let battText = b.onBattery
-        ? "电池 \(b.percent)%\(b.discharging ? "（放电中）" : "")"
-        : "已接电源"
-    if !dsAvailable { print("⚠️  亮度接口不可用（DisplayServices 缺失），关屏功能将无法工作") }
+        ? (L("电池 ") + "\(b.percent)" + "%" + "\(b.discharging ? L("（放电中）") : "")")
+        : L("已接电源")
+    if !dsAvailable { print(L("⚠️  亮度接口不可用（DisplayServices 缺失），关屏功能将无法工作")) }
     if let pid = servicePid() {
-        print("常驻服务运行中 pid=\(pid)，\(fm.fileExists(atPath: stateFile) ? "黑屏中" : "正常显示")，当前亮度 \(readBrightness())")
+        print((L("常驻服务运行中 pid=") + "\(pid)" + L("，") + "\(fm.fileExists(atPath: stateFile) ? L("黑屏中") : L("正常显示"))" + L("，当前亮度 ") + "\(readBrightness())"))
     } else if let r = daemonRunning() {
-        print("一次性模式黑屏中 pid=\(r.pid) 待恢复亮度=\(r.brightness) 当前亮度 \(readBrightness())")
+        print((L("一次性模式黑屏中 pid=") + "\(r.pid)" + L(" 待恢复亮度=") + "\(r.brightness)" + L(" 当前亮度 ") + "\(readBrightness())"))
     } else {
-        print("正常模式（无常驻服务），当前亮度 \(readBrightness())")
+        print((L("正常模式（无常驻服务），当前亮度 ") + "\(readBrightness())"))
     }
-    print("电源: \(battText)，电量下限 \(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : "不限")")
+    print((L("电源: ") + "\(battText)" + L("，电量下限 ") + "\(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : L("不限"))"))
 
 case "version":
     print("blankscreen \(BS_VERSION) (\(BS_COMMIT))")
     print("  macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
-    print("  二进制: \(exePath)")
-    print("  状态目录: \(base)")
+    print((L("  二进制: ") + "\(exePath)"))
+    print((L("  状态目录: ") + "\(base)"))
 
 case "doctor":
     exit(runDoctor())
@@ -1985,18 +2037,18 @@ case "toggle":
             fm.fileExists(atPath: stateFile) != before || fm.fileExists(atPath: rejectFile)
         }
         if let reason = rejectReason() {
-            FileHandle.standardError.write("未能切换：\(reason)\n".data(using: .utf8)!)
+            FileHandle.standardError.write((L("未能切换：") + "\(reason)" + "\n").data(using: .utf8)!)
             exit(1)
         }
         print(changed
-              ? (fm.fileExists(atPath: stateFile) ? "已进入黑屏（常驻服务 pid=\(pid)）" : "已恢复显示")
-              : "已发送切换指令（3s 内未确认，请查看 \(logPath)）")
+              ? (fm.fileExists(atPath: stateFile) ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）")) : L("已恢复显示"))
+              : (L("已发送切换指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
         exit(0)
     }
     if let r = daemonRunning() {
         kill(r.pid, SIGTERM)
         _ = waitUntil(timeout: 3.0) { daemonRunning() == nil }
-        print("已恢复显示，亮度 \(r.brightness)")
+        print((L("已恢复显示，亮度 ") + "\(r.brightness)"))
         exit(0)
     }
     exit(startOneShotDaemon(extra: []))
@@ -2006,60 +2058,103 @@ case "bright":
         // 显式校验而不是默默 clamp：越界值说明用户搞错了单位（例如当成了百分比），
         // 静默改写成极值会让「设成 1.0 结果全黑」这类困惑无法追溯。
         guard let v = Float(args[2]) else {
-            FileHandle.standardError.write("错误：亮度需要 0.0-1.0 的数值，收到: \(args[2])\n".data(using: .utf8)!)
+            FileHandle.standardError.write((L("错误：亮度需要 0.0-1.0 的数值，收到: ") + "\(args[2])" + "\n").data(using: .utf8)!)
             exit(1)
         }
         guard (0...1).contains(v) else {
-            FileHandle.standardError.write("错误：亮度必须在 0.0-1.0 之间，收到: \(args[2])\n".data(using: .utf8)!)
+            FileHandle.standardError.write((L("错误：亮度必须在 0.0-1.0 之间，收到: ") + "\(args[2])" + "\n").data(using: .utf8)!)
             exit(1)
         }
-        if setBrightness(v) { print("亮度 -> \(v)") }
+        if setBrightness(v) { print((L("亮度 -> ") + "\(v)")) }
         else {
-            FileHandle.standardError.write("设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n".data(using: .utf8)!)
+            FileHandle.standardError.write(L("设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n").data(using: .utf8)!)
             exit(1)
         }
     } else {
         let v = readBrightness()
-        if v < 0 { print("读取亮度失败：亮度接口不可用"); exit(1) }
-        print("当前亮度 \(v)")
+        if v < 0 { print(L("读取亮度失败：亮度接口不可用")); exit(1) }
+        print((L("当前亮度 ") + "\(v)"))
     }
 
 default:
-    print("""
-    blankscreen —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
+    let helpBody: String
+    if L10n.isEN {
+        helpBody = """
+        blankscreen — turn the display off without putting the Mac to sleep.
 
-      推荐方式：菜单栏 App（BlankScreenBar.app），热键零授权。见项目 README。
+          Recommended: the menu bar app (BlankScreenBar.app), with a zero-permission hotkey. See the README.
 
-    CLI 用法:
-      blankscreen service install            安装常驻服务（开机自启，热键直接开关）
-      blankscreen service uninstall          卸载常驻服务
-      blankscreen off / on / toggle          进入 / 退出 / 切换黑屏
-      blankscreen status                     查看状态（含电源与电量）
-      blankscreen doctor                     综合自检：关屏能力、显示器可控性、进程、残留
-      blankscreen version                    查看版本
-      blankscreen config --key 11            查看/修改热键、超时、电量下限
-      blankscreen bright [0.0-1.0]           直接读写亮度
+        CLI usage:
+          blankscreen service install             Install the resident service (launches at login, hotkey works)
+          blankscreen service uninstall           Remove the resident service
+          blankscreen off / on / toggle           Blank / restore / toggle
+          blankscreen status                      Show state (including power source and battery)
+          blankscreen doctor                      Full self-check: blanking, display control, processes, leftovers
+          blankscreen version                     Print the version
+          blankscreen config --key 11             View or change the hotkey, timeout, battery floor and interface language
+          blankscreen bright [0.0-1.0]            Read or write brightness directly
 
-      不用常驻服务时: blankscreen off [--timeout 秒] [--no-timeout]
+          Without the resident service: blankscreen off [--timeout SECONDS] [--no-timeout]
 
-    防睡眠（阻止系统睡眠，与关屏相互独立）:
-      blankscreen nosleep on                 开启（进程级：仅在接电源时有效）
-      blankscreen nosleep on --system        开启（系统级：覆盖电池供电与合盖，需助手）
-      blankscreen nosleep on --timeout 3600  指定时长后自动停止
-      blankscreen nosleep off / status       关闭 / 查看层级、电量、助手状态
-      blankscreen nosleep install-helper     安装提权助手（弹系统密码框）
-      blankscreen nosleep uninstall-helper   卸载助手并复位系统睡眠设置
+        Anti-sleep (prevents system sleep; independent of blanking):
+          blankscreen nosleep on                  Enable (process level: AC power only)
+          blankscreen nosleep on --system         Enable (system level: covers battery and closed lid; needs the helper)
+          blankscreen nosleep on --timeout 3600   Stop automatically after a duration
+          blankscreen nosleep off / status        Disable / show level, battery and helper state
+          blankscreen nosleep install-helper      Install the privileged helper (one system password prompt)
+          blankscreen nosleep uninstall-helper    Remove the helper and reset system sleep settings
 
-    为什么系统级需要助手: caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，
-    所以电池供电与合盖这两种场景，进程级断言无解，只能用 pmset disablesleep（需 root）。
-    助手只授权单个 root:wheel 脚本的四个固定参数，且默认不安装。
+        Why the system level needs a helper: per its man page, caffeinate -s only works on AC power,
+        so battery and closed-lid cases need pmset disablesleep, which requires root.
+        The helper grants a single root:wheel script with four fixed arguments, and is never installed by default.
 
-    合盖熄屏: 防睡眠运行期间，守护进程经 SMC 检测合盖并自动熄灭内屏（外接屏不受
-    影响），开盖自动恢复亮度；守护停止时也会恢复，不留黑屏残局。
+        Lid blackout: while anti-sleep runs, the daemon watches the SMC lid switch and turns the built-in
+        display off automatically (external displays are untouched); brightness is restored when the lid
+        opens, and also when the daemon stops — never leaving a black screen behind.
 
-    默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
-    热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。
-    未注册热键时仍可用: blankscreen on（含远程 SSH）/ 一次性模式 12 小时超时兜底
-    电量保护: 默认低于 20% 且使用电池时拒绝关屏，黑屏中跌破则自动恢复（config --battery 0 关闭）
-    """)
+        Default hotkey: ⌃⌥⌘B (B = keyCode 11). Change it: blankscreen config --key 11 --mods ctrl,alt,cmd
+        Hotkeys use the system-level Carbon path and need no permissions; if another app owns the combo it is logged.
+        Without a hotkey you can still use: blankscreen on (including over SSH) / one-shot mode with a 12 h fallback
+        Battery guard: blanking is refused below 20% on battery, and restored if it drops below while blanked (disable: config --battery 0)
+        """
+    } else {
+        helpBody = """
+        blankscreen —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
+
+          推荐方式：菜单栏 App（BlankScreenBar.app），热键零授权。见项目 README。
+
+        CLI 用法:
+          blankscreen service install            安装常驻服务（开机自启，热键直接开关）
+          blankscreen service uninstall          卸载常驻服务
+          blankscreen off / on / toggle          进入 / 退出 / 切换黑屏
+          blankscreen status                     查看状态（含电源与电量）
+          blankscreen doctor                     综合自检：关屏能力、显示器可控性、进程、残留
+          blankscreen version                    查看版本
+          blankscreen config --key 11            查看/修改热键、超时、电量下限、界面语言
+          blankscreen bright [0.0-1.0]           直接读写亮度
+
+          不用常驻服务时: blankscreen off [--timeout 秒] [--no-timeout]
+
+        防睡眠（阻止系统睡眠，与关屏相互独立）:
+          blankscreen nosleep on                 开启（进程级：仅在接电源时有效）
+          blankscreen nosleep on --system        开启（系统级：覆盖电池供电与合盖，需助手）
+          blankscreen nosleep on --timeout 3600  指定时长后自动停止
+          blankscreen nosleep off / status       关闭 / 查看层级、电量、助手状态
+          blankscreen nosleep install-helper     安装提权助手（弹系统密码框）
+          blankscreen nosleep uninstall-helper   卸载助手并复位系统睡眠设置
+
+        为什么系统级需要助手: caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，
+        所以电池供电与合盖这两种场景，进程级断言无解，只能用 pmset disablesleep（需 root）。
+        助手只授权单个 root:wheel 脚本的四个固定参数，且默认不安装。
+
+        合盖熄屏: 防睡眠运行期间，守护进程经 SMC 检测合盖并自动熄灭内屏（外接屏不受
+        影响），开盖自动恢复亮度；守护停止时也会恢复，不留黑屏残局。
+
+        默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
+        热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。
+        未注册热键时仍可用: blankscreen on（含远程 SSH）/ 一次性模式 12 小时超时兜底
+        电量保护: 默认低于 20% 且使用电池时拒绝关屏，黑屏中跌破则自动恢复（config --battery 0 关闭）
+        """
+    }
+    print(helpBody)
 }

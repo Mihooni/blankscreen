@@ -66,13 +66,13 @@ endef
 # 源码按 target 分目录：Swift 只有名为 main.swift 的文件允许顶层代码，
 # 因此 CLI 与菜单栏 App 各有自己的 main.swift，共享代码放 Sources/Shared/。
 cli: version-file
-	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift,blankscreen,build/blankscreen)
+	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift,blankscreen,build/blankscreen)
 
 app: build/BlankScreenBar.app
 
 build/BlankScreenBar.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns version-file
 	@mkdir -p build/BlankScreenBar.app/Contents/MacOS build/BlankScreenBar.app/Contents/Resources
-	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift -o build/bsb_$(t);)
+	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift -o build/bsb_$(t);)
 	lipo -create $(foreach t,$(TARGETS),build/bsb_$(t)) -output build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
 	cp Sources/Info.plist build/BlankScreenBar.app/Contents/Info.plist
 	cp Sources/AppIcon.icns build/BlankScreenBar.app/Contents/Resources/AppIcon.icns

@@ -16,6 +16,10 @@
 
 set -uo pipefail
 
+# 断言基于中文案文，而 CLI 会跟随系统语言（CI 是英文系统）→ 这里锁定为中文。
+# 需要测英文时: SMOKE_LANG=en ./dev-tools/smoke.sh
+export BLANKSCREEN_LANG="${SMOKE_LANG:-zh}"
+
 B="${1:-build/blankscreen}"
 CFG="$HOME/Library/Application Support/blankscreen/config.json"
 pass=0; fail=0; skip=0
@@ -203,6 +207,25 @@ else
     bad "helper 脚本存在语法错误"
 fi
 rm -rf "$tmp_assets"
+
+# ---------- 10. 本地化 ----------
+echo
+echo "【10】本地化（界面语言跟随系统，可用 BLANKSCREEN_LANG 覆盖）"
+if BLANKSCREEN_LANG=en "$B" doctor 2>/dev/null | grep -q '[一-鿿]'; then
+    bad "英文模式下仍有中文残留"
+else
+    ok "英文模式输出无中文残留"
+fi
+if BLANKSCREEN_LANG=zh "$B" doctor 2>/dev/null | grep -q '关屏能力'; then
+    ok "中文模式输出为中文"
+else
+    bad "中文模式未输出中文"
+fi
+if BLANKSCREEN_LANG=en "$B" --help 2>/dev/null | grep -q 'CLI usage'; then
+    ok "帮助文本已本地化"
+else
+    bad "帮助文本未本地化"
+fi
 
 # ---------- 汇总 ----------
 echo

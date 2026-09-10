@@ -93,9 +93,10 @@ struct Config: Codable {
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
-    var lidAwake: Bool = false               // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
+    var lidAwake: Bool = false
+    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en               // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lang }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -106,6 +107,7 @@ struct Config: Codable {
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
+        lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
     }
 }
 let MOD_CTRL: UInt64  = 1 << 18
@@ -133,7 +135,7 @@ let keyItems: [(String, Int64)] = [
     ("F7", 98), ("F8", 100), ("F9", 101), ("F10", 109), ("F11", 103), ("F12", 111),
     ("F13", 105), ("F14", 107), ("F15", 113), ("F16", 106), ("F17", 64), ("F18", 79),
     ("F19", 80), ("F20", 90),
-    ("Space 空格", 49), ("Esc", 53), ("Return 回车", 36), ("Tab", 48)
+    (L("Space 空格"), 49), ("Esc", 53), (L("Return 回车"), 36), ("Tab", 48)
 ]
 func keyName(_ code: Int64) -> String { keyItems.first { $0.1 == code }?.0 ?? "keyCode \(code)" }
 func modText(_ flags: UInt64) -> String {
@@ -142,7 +144,7 @@ func modText(_ flags: UInt64) -> String {
     if flags & MOD_ALT   != 0 { s += "⌥" }
     if flags & MOD_SHIFT != 0 { s += "⇧" }
     if flags & MOD_CMD   != 0 { s += "⌘" }
-    return s.isEmpty ? "（无修饰键）" : s
+    return s.isEmpty ? L("（无修饰键）") : s
 }
 func hotkeyText(_ c: Config) -> String { modText(c.modFlags) + keyName(c.keyCode) }
 
@@ -190,10 +192,10 @@ func registerCarbonHotKey(keyCode: Int64, modFlags: UInt64) -> OSStatus {
 }
 func carbonStatusText(_ st: OSStatus) -> String {
     switch st {
-    case noErr:                   return "已注册"
-    case OSStatus(eventHotKeyExistsErr):      return "已被系统或其他 App 占用，请换一个组合"
-    case OSStatus(eventHotKeyInvalidErr):     return "组合无效（全局热键需要至少一个修饰键）"
-    default:                      return "注册失败（OSStatus \(st)）"
+    case noErr:                   return L("已注册")
+    case OSStatus(eventHotKeyExistsErr):      return L("已被系统或其他 App 占用，请换一个组合")
+    case OSStatus(eventHotKeyInvalidErr):     return L("组合无效（全局热键需要至少一个修饰键）")
+    default:                      return (L("注册失败（OSStatus ") + "\(st)" + L("）"))
     }
 }
 
@@ -441,8 +443,8 @@ final class ScreenController {
     }
 
     var nosleepLevelText: String {
-        guard nosleepOn else { return "未开启" }
-        return nosleepSystemOn ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）"
+        guard nosleepOn else { return L("未开启") }
+        return nosleepSystemOn ? L("系统级（含电池与合盖）") : L("进程级（仅电源适配器）")
     }
 
     /// 黑屏期间持有 caffeinate，阻止空闲/显示器睡眠（-w 保证退出即回收）
@@ -463,7 +465,7 @@ final class ScreenController {
         if cfg.batteryFloor > 0 {
             let b = batteryStatus()
             if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消开启防睡眠（避免耗尽电池）")
+                return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消开启防睡眠（避免耗尽电池）")))
             }
         }
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -490,7 +492,7 @@ final class ScreenController {
     }
 
     /// 系统级开关是持久的，停止时必须显式复位，否则系统再也不会睡眠
-    func stopNosleep(_ reason: String = "手动关闭") {
+    func stopNosleep(_ reason: String = L("手动关闭")) {
         guard nosleepOn else { return }
         if nosleepSystemOn { _ = helperExec("off"); nosleepSystemOn = false }
         nosleepCaff?.terminate(); nosleepCaff = nil
@@ -519,13 +521,13 @@ final class ScreenController {
         guard !blacked else { return true }
         restoreRetry?.invalidate(); restoreRetry = nil
         guard dsAvailable else {
-            return reject("亮度接口不可用（DisplayServices 缺失），无法关屏")
+            return reject(L("亮度接口不可用（DisplayServices 缺失），无法关屏"))
         }
         // 电量下限：黑屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
         if cfg.batteryFloor > 0 {
             let b = batteryStatus()
             if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                return reject("电量 \(b.percent)% 低于下限 \(cfg.batteryFloor)%，已取消关屏（避免耗尽电池）")
+                return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消关屏（避免耗尽电池）")))
             }
         }
         try? fm.removeItem(atPath: rejectFile)
@@ -560,10 +562,10 @@ final class ScreenController {
             guard let self = self, self.blacked || self.nosleepOn else { return }
             let b = batteryStatus()
             guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else { return }
-            let m = "电量 \(b.percent)% 已达下限 \(self.cfg.batteryFloor)%，自动恢复"
+            let m = (L("电量 ") + "\(b.percent)" + L("% 已达下限 ") + "\(self.cfg.batteryFloor)" + L("%，自动恢复"))
             blog("bar: \(m)")
             notifyUser(m)
-            self.stopNosleep("电量已达下限 \(self.cfg.batteryFloor)%")
+            self.stopNosleep((L("电量已达下限 ") + "\(self.cfg.batteryFloor)" + "%"))
             if self.blacked { self.restore() }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -577,13 +579,13 @@ final class ScreenController {
         timeoutTimer?.invalidate(); timeoutTimer = nil
         battTimer?.invalidate(); battTimer = nil
         // 联动开启的防睡眠随黑屏一起结束；用户手动开启的保持不动
-        if nosleepAuto { stopNosleep("已恢复显示") }
+        if nosleepAuto { stopNosleep(L("已恢复显示")) }
         let target = cfg.restoreFixed ?? saved
         blog("bar: 恢复显示 \(target)")
         // 恢复失败不能就此罢休：屏幕会一直黑着。持续重试直到真的亮回来。
         if !restoreBrightness(target) {
             blog("bar: 错误：亮度恢复失败，转入持续重试")
-            notifyUser("亮度恢复失败，正在持续重试")
+            notifyUser(L("亮度恢复失败，正在持续重试"))
             restoreRetry?.invalidate()
             let rt = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] t in
                 guard let self = self else { t.invalidate(); return }
@@ -699,7 +701,7 @@ final class ScreenController {
                 if lidDaemonPid() == nil { _ = setLidAwake(true) }
             } else {
                 var c = loadConfig(); c.lidAwake = false; saveConfig(c); cfg = c
-                notifyUser("「合盖后不睡眠」已停用：提权助手未安装（可能已被卸载）")
+                notifyUser(L("「合盖后不睡眠」已停用：提权助手未安装（可能已被卸载）"))
             }
         }
 
@@ -765,7 +767,7 @@ final class ScreenController {
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if out.contains("blankscreen") || out.contains("BlankScreenBar") {
             // 旧实例可能是 CLI daemon，也可能是上一个 BlankScreenBar 实例——都应接管（单实例语义）
-            let which = out.contains("BlankScreenBar") ? "上一个 BlankScreenBar 实例" : "blankscreen daemon"
+            let which = out.contains("BlankScreenBar") ? L("上一个 BlankScreenBar 实例") : "blankscreen daemon"
             blog("bar: 接管 service.pid，终止旧 \(which) pid=\(pid)")
             kill(pid, SIGTERM)
             usleep(800_000)
@@ -804,7 +806,7 @@ final class ScreenController {
     func shutdown() {
         restore()
         // 系统级开关是持久的：退出前必须复位，否则退出后系统再也不会睡眠
-        stopNosleep("程序退出")
+        stopNosleep(L("程序退出"))
         try? fm.removeItem(atPath: serviceFile)
         blog("bar: 退出")
         exit(0)
@@ -834,13 +836,13 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var checkBtn: NSButton!
 
     private let timeoutChoices: [(String, Double)] = [
-        ("不启用（一直保持黑屏）", 0),
-        ("30 分钟", 1800), ("1 小时", 3600), ("2 小时", 7200),
-        ("4 小时", 14400), ("8 小时", 28800), ("12 小时", 43200)
+        (L("不启用（一直保持黑屏）"), 0),
+        (L("30 分钟"), 1800), (L("1 小时"), 3600), (L("2 小时"), 7200),
+        (L("4 小时"), 14400), (L("8 小时"), 28800), (L("12 小时"), 43200)
     ]
     private let batteryChoices: [(String, Int)] = [
-        ("不限制", 0), ("50%", 50), ("30%", 30),
-        ("20%（推荐）", 20), ("15%", 15), ("10%", 10)
+        (L("不限制"), 0), ("50%", 50), ("30%", 30),
+        (L("20%（推荐）"), 20), ("15%", 15), ("10%", 10)
     ]
 
     func show() {
@@ -853,7 +855,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private func build() -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 730),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        w.title = "BlankScreen 设置"
+        w.title = L("BlankScreen 设置")
         w.delegate = self
         w.isReleasedWhenClosed = false
         w.center()
@@ -873,7 +875,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         ])
 
         // —— 热键
-        root.addArrangedSubview(section("恢复热键"))
+        root.addArrangedSubview(section(L("恢复热键")))
         let modRow = NSStackView(); modRow.orientation = .horizontal; modRow.spacing = 10
         for (title, flag) in [("⌃ Control", MOD_CTRL), ("⌥ Option", MOD_ALT),
                               ("⌘ Command", MOD_CMD), ("⇧ Shift", MOD_SHIFT)] {
@@ -886,7 +888,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         keyPop = NSPopUpButton(frame: .zero, pullsDown: false)
         keyPop.addItems(withTitles: keyItems.map { "\($0.0)" })
         keyPop.target = self; keyPop.action = #selector(onHotkeyChanged(_:))
-        root.addArrangedSubview(row("按键", keyPop))
+        root.addArrangedSubview(row(L("按键"), keyPop))
 
         hkLabel = NSTextField(labelWithString: "")
         hkLabel.font = .systemFont(ofSize: 12)
@@ -894,45 +896,45 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(hkLabel)
 
         // —— 兜底超时
-        root.addArrangedSubview(section("自动恢复兜底"))
+        root.addArrangedSubview(section(L("自动恢复兜底")))
         timeoutPop = NSPopUpButton(frame: .zero, pullsDown: false)
         timeoutPop.addItems(withTitles: timeoutChoices.map { $0.0 })
         timeoutPop.target = self; timeoutPop.action = #selector(onTimeoutChanged(_:))
-        root.addArrangedSubview(row("黑屏后", timeoutPop))
-        let tip = wrapLabel("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。")
+        root.addArrangedSubview(row(L("黑屏后"), timeoutPop))
+        let tip = wrapLabel(L("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。"))
         root.addArrangedSubview(tip)
 
         // —— 电量下限
-        root.addArrangedSubview(section("电量保护"))
+        root.addArrangedSubview(section(L("电量保护")))
         batteryPop = NSPopUpButton(frame: .zero, pullsDown: false)
         batteryPop.addItems(withTitles: batteryChoices.map { $0.0 })
         batteryPop.target = self; batteryPop.action = #selector(onBatteryChanged(_:))
-        root.addArrangedSubview(row("低于", batteryPop))
-        let battTip = wrapLabel("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。")
+        root.addArrangedSubview(row(L("低于"), batteryPop))
+        let battTip = wrapLabel(L("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。"))
         root.addArrangedSubview(battTip)
 
         // —— 防睡眠
-        root.addArrangedSubview(section("防睡眠（阻止系统睡眠）"))
-        nosleepBtn = NSButton(checkboxWithTitle: "息屏时不睡眠（每次息屏/关屏自动生效）", target: self, action: #selector(onNosleepToggled(_:)))
+        root.addArrangedSubview(section(L("防睡眠（阻止系统睡眠）")))
+        nosleepBtn = NSButton(checkboxWithTitle: L("息屏时不睡眠（每次息屏/关屏自动生效）"), target: self, action: #selector(onNosleepToggled(_:)))
         root.addArrangedSubview(nosleepBtn)
-        lidBtn = NSButton(checkboxWithTitle: "合盖后不睡眠（长期模式，重启自动恢复）", target: self, action: #selector(onLidToggled(_:)))
+        lidBtn = NSButton(checkboxWithTitle: L("合盖后不睡眠（长期模式，重启自动恢复）"), target: self, action: #selector(onLidToggled(_:)))
         root.addArrangedSubview(lidBtn)
-        root.addArrangedSubview(wrapLabel("开启后合盖时内屏熄灭、机器持续运行——下载、远程访问、外接显示照常工作。" +
-            "建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。"))
+        root.addArrangedSubview(wrapLabel(L("开启后合盖时内屏熄灭、机器持续运行——下载、远程访问、外接显示照常工作。") +
+            L("建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")))
 
         let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
-        helperBtn = NSButton(title: "安装提权助手…", target: self, action: #selector(onInstallHelper(_:)))
+        helperBtn = NSButton(title: L("安装提权助手…"), target: self, action: #selector(onInstallHelper(_:)))
         helperRow.addArrangedSubview(helperBtn)
         root.addArrangedSubview(helperRow)
         helperLabel = wrapLabel("")
         root.addArrangedSubview(helperLabel)
 
         // —— 恢复亮度
-        root.addArrangedSubview(section("恢复后的亮度"))
+        root.addArrangedSubview(section(L("恢复后的亮度")))
         restorePop = NSPopUpButton(frame: .zero, pullsDown: false)
-        restorePop.addItems(withTitles: ["恢复到关屏前的亮度", "固定为"])
+        restorePop.addItems(withTitles: [L("恢复到关屏前的亮度"), L("固定为")])
         restorePop.target = self; restorePop.action = #selector(onRestoreModeChanged(_:))
-        root.addArrangedSubview(row("策略", restorePop))
+        root.addArrangedSubview(row(L("策略"), restorePop))
 
         let sliderRow = NSStackView(); sliderRow.orientation = .horizontal; sliderRow.spacing = 8
         restoreSlider = NSSlider(value: 50, minValue: 5, maxValue: 100, target: self, action: #selector(onSliderChanged(_:)))
@@ -945,24 +947,24 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(sliderRow)
 
         // —— 安全提醒
-        root.addArrangedSubview(section("安全提醒"))
+        root.addArrangedSubview(section(L("安全提醒")))
         root.addArrangedSubview(wrapLabel(
-            "关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。"
-            + "但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。"
-            + "离开座位前请手动锁屏（⌃⌘Q）。"))
+            L("关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。")
+            + L("但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。")
+            + L("离开座位前请手动锁屏（⌃⌘Q）。")))
 
         // —— 开机自启
-        root.addArrangedSubview(section("启动"))
-        loginBtn = NSButton(checkboxWithTitle: "登录时自动启动（菜单栏常驻）", target: self, action: #selector(onLoginToggled(_:)))
+        root.addArrangedSubview(section(L("启动")))
+        loginBtn = NSButton(checkboxWithTitle: L("登录时自动启动（菜单栏常驻）"), target: self, action: #selector(onLoginToggled(_:)))
         root.addArrangedSubview(loginBtn)
 
         // —— 热键状态
-        root.addArrangedSubview(section("热键状态"))
+        root.addArrangedSubview(section(L("热键状态")))
         permLabel = wrapLabel("")
         root.addArrangedSubview(permLabel)
 
         let btnRow = NSStackView(); btnRow.orientation = .horizontal; btnRow.spacing = 10
-        checkBtn = NSButton(title: "运行自检", target: self, action: #selector(onCheck(_:)))
+        checkBtn = NSButton(title: L("运行自检"), target: self, action: #selector(onCheck(_:)))
         btnRow.addArrangedSubview(checkBtn)
         root.addArrangedSubview(btnRow)
 
@@ -1007,7 +1009,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         cfg = ctl.cfg
         for (flag, b) in modBtns { b.state = (cfg.modFlags & flag != 0) ? .on : .off }
         keyPop.selectItem(at: keyItems.firstIndex { $0.1 == cfg.keyCode } ?? 1)
-        hkLabel.stringValue = "当前: " + hotkeyText(cfg) + "　（设置即时生效）"
+        hkLabel.stringValue = L("当前: ") + hotkeyText(cfg) + L("　（设置即时生效）")
         timeoutPop.selectItem(at: timeoutChoices.firstIndex { $0.1 == cfg.timeout }
                               ?? timeoutChoices.firstIndex { $0.1 == 43200 }!)
         let floor = cfg.batteryFloor
@@ -1028,17 +1030,17 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private func syncNosleep() {
         nosleepBtn.state = cfg.autoNosleep ? .on : .off
         if ctl.helperInstalled() {
-            helperBtn.title = "卸载提权助手"
+            helperBtn.title = L("卸载提权助手")
             // 过旧的助手缺少「多持有者记账」：关屏联动与手动防睡眠会互相踩掉对方的设置
             helperLabel.stringValue = ctl.helperOutdated()
-                ? "提权助手：版本过旧 —— 缺少多持有者记账，关屏联动与手动防睡眠会互相关掉对方。"
-                  + "请卸载后重新安装（需要输入一次登录密码）。"
-                : "提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。" +
-                  "（仅授权单个 root:wheel 脚本的四个固定参数）"
+                ? L("提权助手：版本过旧 —— 缺少多持有者记账，关屏联动与手动防睡眠会互相关掉对方。")
+                  + L("请卸载后重新安装（需要输入一次登录密码）。")
+                : L("提权助手：已安装 —— 防睡眠可覆盖电池供电与合盖。") +
+                  L("（仅授权单个 root:wheel 脚本的四个固定参数）")
         } else {
-            helperBtn.title = "安装提权助手…"
-            helperLabel.stringValue = "提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，" +
-                "电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。"
+            helperBtn.title = L("安装提权助手…")
+            helperLabel.stringValue = L("提权助手：未安装 —— 此时防睡眠仅在本机接电源时有效，") +
+                L("电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。")
         }
         helperLabel.needsLayout = true
     }
@@ -1057,9 +1059,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         if want && !ctl.helperInstalled() {
             lidBtn.state = .off
             let a = NSAlert()
-            a.messageText = "「合盖后不睡眠」需要提权助手"
-            a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
-                "点击下方「安装提权助手」（弹一次系统密码框）后再开启本项。"
+            a.messageText = L("「合盖后不睡眠」需要提权助手")
+            a.informativeText = L("合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。") +
+                L("点击下方「安装提权助手」（弹一次系统密码框）后再开启本项。")
             a.runModal()
             return
         }
@@ -1075,8 +1077,8 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     @objc private func onInstallHelper(_ sender: Any?) {
         let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
         guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
-            let a = NSAlert(); a.messageText = "未找到命令行工具"
-            a.informativeText = "请先在终端安装 blankscreen，或手动执行：\nblankscreen nosleep install-helper"
+            let a = NSAlert(); a.messageText = L("未找到命令行工具")
+            a.informativeText = L("请先在终端安装 blankscreen，或手动执行：\nblankscreen nosleep install-helper")
             a.runModal(); return
         }
         let uninstall = ctl.helperInstalled()
@@ -1091,13 +1093,13 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
                 out = String(data: data, encoding: .utf8) ?? ""
-            } else { out = "无法启动 \(cli)" }
+            } else { out = (L("无法启动 ") + "\(cli)") }
             DispatchQueue.main.async {
                 self.helperBtn.isEnabled = true
                 self.syncNosleep()
                 let a = NSAlert()
-                a.messageText = uninstall ? "卸载提权助手" : "安装提权助手"
-                a.informativeText = out.isEmpty ? "已完成（无输出）" : out
+                a.messageText = uninstall ? L("卸载提权助手") : L("安装提权助手")
+                a.informativeText = out.isEmpty ? L("已完成（无输出）") : out
                 a.runModal()
             }
         }
@@ -1105,8 +1107,8 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private func refreshPerm() {
         let c = ctl.cfg
         permLabel.stringValue = ctl.hotkeyReady
-            ? "\(hotkeyText(c))：✅ 已注册为系统全局热键。本程序走系统级热键链路，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。"
-            : "\(hotkeyText(c))：⚠️ \(carbonStatusText(ctl.lastHotkeyStatus))。请换一个组合（建议 ⇧⌘B 或 ⌃⌥⌘B）。"
+            ? ("\(hotkeyText(c))" + L("：✅ 已注册为系统全局热键。本程序走系统级热键链路，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。"))
+            : ("\(hotkeyText(c))" + L("：⚠️ ") + "\(carbonStatusText(ctl.lastHotkeyStatus))" + L("。请换一个组合（建议 ⇧⌘B 或 ⌃⌥⌘B）。"))
     }
 
     // MARK: 事件
@@ -1116,9 +1118,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         // 系统全局热键必须带至少一个修饰键，否则 RegisterEventHotKey 会失败
         guard flags != 0 else {
             let a = NSAlert(); a.alertStyle = .warning
-            a.messageText = "需要修饰键"
-            a.informativeText = "系统级全局热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个，不能只用一个普通键。"
-            a.addButton(withTitle: "好"); a.runModal()
+            a.messageText = L("需要修饰键")
+            a.informativeText = L("系统级全局热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个，不能只用一个普通键。")
+            a.addButton(withTitle: L("好")); a.runModal()
             syncFromConfig(); return
         }
         cfg.modFlags = flags
@@ -1152,7 +1154,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             ctl.scheduleTimeout()
             ctl.scheduleBatteryGuard()
         }
-        hkLabel.stringValue = "当前: " + hotkeyText(cfg) + "　（设置即时生效）"
+        hkLabel.stringValue = L("当前: ") + hotkeyText(cfg) + L("　（设置即时生效）")
         AppDelegate.shared?.refreshUI()
     }
 
@@ -1190,9 +1192,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         if r != 0 {
             let a = NSAlert()
             a.alertStyle = .warning
-            a.messageText = "已写入配置，但未能注册到 launchd"
-            a.informativeText = "请在「终端」中执行：\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/\(barLabel).plist\n\n或在系统设置的「登录项」里手动添加 \(appPath)"
-            a.addButton(withTitle: "好")
+            a.messageText = L("已写入配置，但未能注册到 launchd")
+            a.informativeText = (L("请在「终端」中执行：\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/") + "\(barLabel)" + L(".plist\n\n或在系统设置的「登录项」里手动添加 ") + "\(appPath)")
+            a.addButton(withTitle: L("好"))
             a.runModal()
         }
         blog("bar: 登录自启 -> \(on)")
@@ -1231,7 +1233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let b = statusItem.button {
             b.image = icon(blacked: false)
             b.image?.isTemplate = true
-            b.toolTip = "BlankScreen —— 点击打开菜单"
+            b.toolTip = L("BlankScreen —— 点击打开菜单")
         }
         menu = buildMenu()
         menu.delegate = self
@@ -1245,7 +1247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--uitest") {
             openSettings(nil)
             Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { _ in
-                if let w = NSApp.windows.first(where: { $0.title == "BlankScreen 设置" }) {
+                if let w = NSApp.windows.first(where: { $0.title == L("BlankScreen 设置") }) {
                     blog("bar: uitest 窗口 frame=\(w.frame)")
                     Self.dumpView(w.contentView!, depth: 0)
                 } else { blog("bar: uitest 未找到设置窗口") }
@@ -1277,41 +1279,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         //   ① 关闭显示器 —— 立即黑屏（机器保持运行）
         //   ② 息屏时不睡眠 —— 每次息屏/关屏期间自动阻止系统睡眠
         //   ③ 合盖后不睡眠 —— 合盖也持续运行（长期模式，重启自动恢复）
-        stateItem = NSMenuItem(title: "○ 屏幕正常", action: nil, keyEquivalent: "")
+        stateItem = NSMenuItem(title: L("○ 屏幕正常"), action: nil, keyEquivalent: "")
         m.addItem(stateItem)
         m.addItem(.separator())
-        toggleItem = NSMenuItem(title: "关闭显示器", action: #selector(toggle(_:)), keyEquivalent: "")
+        toggleItem = NSMenuItem(title: L("关闭显示器"), action: #selector(toggle(_:)), keyEquivalent: "")
         toggleItem.target = self
-        toggleItem.toolTip = "立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复"
+        toggleItem.toolTip = L("立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复")
         m.addItem(toggleItem)
-        nosleepItem = NSMenuItem(title: "息屏时不睡眠", action: #selector(toggleAutoNosleep(_:)), keyEquivalent: "")
+        nosleepItem = NSMenuItem(title: L("息屏时不睡眠"), action: #selector(toggleAutoNosleep(_:)), keyEquivalent: "")
         nosleepItem.target = self
-        nosleepItem.toolTip = "开启后，每次息屏/关屏期间自动阻止系统睡眠，恢复显示时自动解除"
+        nosleepItem.toolTip = L("开启后，每次息屏/关屏期间自动阻止系统睡眠，恢复显示时自动解除")
         m.addItem(nosleepItem)
         // 合盖模式：长期持久的「合盖也不睡」，由独立 CLI 守护持有，重启自动恢复
-        lidItem = NSMenuItem(title: "合盖后不睡眠（长期运行）", action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
+        lidItem = NSMenuItem(title: L("合盖后不睡眠（长期运行）"), action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
         lidItem.target = self
-        lidItem.toolTip = "开启后合盖也不睡眠：内屏熄灭、机器持续运行；重启电脑后自动恢复"
+        lidItem.toolTip = L("开启后合盖也不睡眠：内屏熄灭、机器持续运行；重启电脑后自动恢复")
         m.addItem(lidItem)
         // 首次使用装一次提权助手（弹系统密码框）；装好后此入口隐藏（设置面板仍可卸载）。
-        setupItem = NSMenuItem(title: "安装提权助手（首次使用）…", action: #selector(runSetup(_:)), keyEquivalent: "")
+        setupItem = NSMenuItem(title: L("安装提权助手（首次使用）…"), action: #selector(runSetup(_:)), keyEquivalent: "")
         setupItem.target = self
-        setupItem.toolTip = "让「息屏时不睡眠」「合盖后不睡眠」覆盖电池与合盖（需 root，弹一次密码框）"
+        setupItem.toolTip = L("让「息屏时不睡眠」「合盖后不睡眠」覆盖电池与合盖（需 root，弹一次密码框）")
         m.addItem(setupItem)
         m.addItem(.separator())
-        let set = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        let set = NSMenuItem(title: L("设置…"), action: #selector(openSettings(_:)), keyEquivalent: ",")
         set.target = self; m.addItem(set)
-        let chk = NSMenuItem(title: "热键自检", action: #selector(checkHotkey(_:)), keyEquivalent: "")
+        let chk = NSMenuItem(title: L("热键自检"), action: #selector(checkHotkey(_:)), keyEquivalent: "")
         chk.target = self; m.addItem(chk)
         permItem = NSMenuItem(title: "", action: #selector(openAuthorizeFromMenu(_:)), keyEquivalent: "")
         permItem.target = self; m.addItem(permItem)
         m.addItem(.separator())
-        loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin(_:)), keyEquivalent: "")
+        loginItem = NSMenuItem(title: L("登录时启动"), action: #selector(toggleLogin(_:)), keyEquivalent: "")
         loginItem.target = self; m.addItem(loginItem)
-        let log = NSMenuItem(title: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
+        let log = NSMenuItem(title: L("打开日志"), action: #selector(openLog(_:)), keyEquivalent: "")
         log.target = self; m.addItem(log)
         m.addItem(.separator())
-        let q = NSMenuItem(title: "退出", action: #selector(quit(_:)), keyEquivalent: "q")
+        let q = NSMenuItem(title: L("退出"), action: #selector(quit(_:)), keyEquivalent: "q")
         q.target = self; m.addItem(q)
         return m
     }
@@ -1322,26 +1324,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.title = hotkeyUnavailable ? "⚠" : ""
         statusItem.button?.toolTip = hotkeyUnavailable
-            ? "BlankScreen —— 快捷键未生效：\(carbonStatusText(ctl.lastHotkeyStatus))"
-            : "BlankScreen —— 快捷键 \(hotkeyText(ctl.cfg))，点击打开菜单"
-        stateItem.title = blacked ? "● 屏幕已关闭 · 机器运行中" : "○ 屏幕正常"
-        toggleItem.title = blacked ? "恢复显示器  \(hotkeyText(ctl.cfg))" : "关闭显示器  \(hotkeyText(ctl.cfg))"
+            ? (L("BlankScreen —— 快捷键未生效：") + "\(carbonStatusText(ctl.lastHotkeyStatus))")
+            : (L("BlankScreen —— 快捷键 ") + "\(hotkeyText(ctl.cfg))" + L("，点击打开菜单"))
+        stateItem.title = blacked ? L("● 屏幕已关闭 · 机器运行中") : L("○ 屏幕正常")
+        toggleItem.title = blacked ? (L("恢复显示器  ") + "\(hotkeyText(ctl.cfg))") : (L("关闭显示器  ") + "\(hotkeyText(ctl.cfg))")
         // ② 息屏时不睡眠：勾选 = 自动联动已开启；黑屏中额外显示当前生效层级
         nosleepItem.state = ctl.cfg.autoNosleep ? .on : .off
         if blacked && ctl.nosleepOn {
             nosleepItem.title = ctl.nosleepSystemOn
-                ? "息屏时不睡眠（已生效 · 系统级）"
-                : "息屏时不睡眠（已生效 · 仅接电源）"
+                ? L("息屏时不睡眠（已生效 · 系统级）")
+                : L("息屏时不睡眠（已生效 · 仅接电源）")
         } else {
-            nosleepItem.title = "息屏时不睡眠"
+            nosleepItem.title = L("息屏时不睡眠")
         }
         // ③ 合盖后不睡眠：勾选由系统菜单的原生 ✓ 表达，不再重复加字
         lidItem.state = ctl.lidOn ? .on : .off
-        lidItem.title = "合盖后不睡眠（长期运行）"
+        lidItem.title = L("合盖后不睡眠（长期运行）")
         setupItem.isHidden = ctl.helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
-            permItem.title = "⚠️ 快捷键未生效 —— 点击排查"
+            permItem.title = L("⚠️ 快捷键未生效 —— 点击排查")
             permItem.isHidden = false
         } else {
             permItem.isHidden = true
@@ -1361,8 +1363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func runSetup(_ sender: Any?) {
         let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
         guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
-            let a = NSAlert(); a.messageText = "未找到命令行工具"
-            a.informativeText = "请先安装 blankscreen 命令行工具（.pkg 安装包已包含）。"
+            let a = NSAlert(); a.messageText = L("未找到命令行工具")
+            a.informativeText = L("请先安装 blankscreen 命令行工具（.pkg 安装包已包含）。")
             a.runModal(); return
         }
         setupItem.isEnabled = false
@@ -1375,13 +1377,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if (try? p.run()) != nil {
                 out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 p.waitUntilExit()
-            } else { out = "无法启动 \(cli)" }
+            } else { out = (L("无法启动 ") + "\(cli)") }
             DispatchQueue.main.async {
                 self.setupItem.isEnabled = true
                 self.refreshUI()
                 let a = NSAlert()
-                a.messageText = "一键防睡眠"
-                a.informativeText = out.isEmpty ? "已完成" : out
+                a.messageText = L("一键防睡眠")
+                a.informativeText = out.isEmpty ? L("已完成") : out
                 a.runModal()
             }
         }
@@ -1405,14 +1407,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ctl.cfg = c
         if c.autoNosleep {
             if ctl.blacked { ctl.startNosleep(auto: true) }
-            notifyUser("已开启「息屏时不睡眠」：" +
+            notifyUser(L("已开启「息屏时不睡眠」：") +
                 (ctl.helperInstalled()
-                    ? "每次息屏/关屏期间自动阻止系统睡眠（系统级，覆盖合盖与电池）。"
-                    : "每次息屏/关屏期间自动阻止系统睡眠。注意：未安装提权助手时仅接电源有效，合盖仍会睡。"))
+                    ? L("每次息屏/关屏期间自动阻止系统睡眠（系统级，覆盖合盖与电池）。")
+                    : L("每次息屏/关屏期间自动阻止系统睡眠。注意：未安装提权助手时仅接电源有效，合盖仍会睡。")))
         } else {
             // 正在黑屏中的联动防睡眠随之解除；合盖模式（独立守护）不受影响
-            if ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep("已关闭「息屏时不睡眠」") }
-            notifyUser("已关闭「息屏时不睡眠」：息屏/关屏不再阻止系统睡眠。")
+            if ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep(L("已关闭「息屏时不睡眠」")) }
+            notifyUser(L("已关闭「息屏时不睡眠」：息屏/关屏不再阻止系统睡眠。"))
         }
         refreshUI()
     }
@@ -1422,17 +1424,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleLidAwake(_ sender: Any?) {
         if loadConfig().lidAwake {
             _ = ctl.setLidAwake(false)
-            notifyUser("「合盖后不睡眠」已关闭：合盖后将恢复正常睡眠。")
+            notifyUser(L("「合盖后不睡眠」已关闭：合盖后将恢复正常睡眠。"))
             refreshUI()
             return
         }
         guard ctl.helperInstalled() else {
             let a = NSAlert()
-            a.messageText = "「合盖后不睡眠」需要提权助手"
-            a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
-                "点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数），装完后再点本项即可。"
-            a.addButton(withTitle: "一键安装并开启")
-            a.addButton(withTitle: "取消")
+            a.messageText = L("「合盖后不睡眠」需要提权助手")
+            a.informativeText = L("合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。") +
+                L("点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数），装完后再点本项即可。")
+            a.addButton(withTitle: L("一键安装并开启"))
+            a.addButton(withTitle: L("取消"))
             if a.runModal() == .alertFirstButtonReturn {
                 runSetup(sender)
                 // runSetup 的 setup 流程已包含「立即开启系统级防睡眠」；再把持久标志写上
@@ -1445,13 +1447,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if ctl.setLidAwake(true) {
             let floor = ctl.cfg.batteryFloor
-            notifyUser("「合盖后不睡眠」已开启：合盖后内屏熄灭、机器持续运行（下载 / 远程 / 外接显示均可用）。" +
-                       (floor > 0 ? "电池放电低于 \(floor)% 会自动停止。" : ""))
+            notifyUser(L("「合盖后不睡眠」已开启：合盖后内屏熄灭、机器持续运行（下载 / 远程 / 外接显示均可用）。") +
+                       (floor > 0 ? (L("电池放电低于 ") + "\(floor)" + L("% 会自动停止。")) : ""))
         } else {
             let a = NSAlert()
             a.alertStyle = .warning
-            a.messageText = "「合盖后不睡眠」开启失败"
-            a.informativeText = "可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。"
+            a.messageText = L("「合盖后不睡眠」开启失败")
+            a.informativeText = L("可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。")
             a.runModal()
         }
         refreshUI()
@@ -1465,9 +1467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensureHotkey()
         guard ctl.hotkeyReady else {
             let a = NSAlert(); a.alertStyle = .warning
-            a.messageText = "快捷键未生效"
-            a.informativeText = "\(hotkeyText(ctl.cfg))：\(carbonStatusText(ctl.lastHotkeyStatus))。\n\n本程序使用系统级全局热键，不需要「辅助功能 / 输入监控」授权。若组合被其他 App 占用，请在设置里换一个。"
-            a.addButton(withTitle: "好"); a.runModal(); return
+            a.messageText = L("快捷键未生效")
+            a.informativeText = ("\(hotkeyText(ctl.cfg))" + L("：") + "\(carbonStatusText(ctl.lastHotkeyStatus))" + L("。\n\n本程序使用系统级全局热键，不需要「辅助功能 / 输入监控」授权。若组合被其他 App 占用，请在设置里换一个。"))
+            a.addButton(withTitle: L("好")); a.runModal(); return
         }
         statusItem.button?.title = "⏳"
         ctl.selfTest { [weak self] ok in
@@ -1476,11 +1478,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.refreshUI()
                 let a = NSAlert()
                 a.alertStyle = ok ? .informational : .warning
-                a.messageText = ok ? "热键可用" : "热键未响应"
+                a.messageText = ok ? L("热键可用") : L("热键未响应")
                 a.informativeText = ok
-                    ? "已确认系统把 \(hotkeyText(self?.ctl.cfg ?? Config())) 投递给了本程序，可直接开关显示。"
-                    : "自检未收到 \(hotkeyText(self?.ctl.cfg ?? Config()))。\n\n可能原因：① 该组合被其他 App 抢先接管，换一个组合再试；② 本程序刚重装，系统热键表尚未刷新，退出重开一次。"
-                a.addButton(withTitle: "好"); a.runModal()
+                    ? (L("已确认系统把 ") + "\(hotkeyText(self?.ctl.cfg ?? Config()))" + L(" 投递给了本程序，可直接开关显示。"))
+                    : (L("自检未收到 ") + "\(hotkeyText(self?.ctl.cfg ?? Config()))" + L("。\n\n可能原因：① 该组合被其他 App 抢先接管，换一个组合再试；② 本程序刚重装，系统热键表尚未刷新，退出重开一次。"))
+                a.addButton(withTitle: L("好")); a.runModal()
             }
         }
     }
@@ -1497,9 +1499,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if r != 0 { r = sh("/bin/launchctl", ["load", "-w", barPlist]) }
             if r != 0 {
                 let a = NSAlert(); a.alertStyle = .warning
-                a.messageText = "已写入配置，但未能注册 launchd"
-                a.informativeText = "请在终端执行：\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/\(barLabel).plist"
-                a.addButton(withTitle: "好"); a.runModal()
+                a.messageText = L("已写入配置，但未能注册 launchd")
+                a.informativeText = (L("请在终端执行：\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/") + "\(barLabel)" + ".plist")
+                a.addButton(withTitle: L("好")); a.runModal()
             }
         } else {
             sh("/bin/launchctl", ["bootout", "gui/\(getuid())/\(barLabel)"])
@@ -1520,18 +1522,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let a = NSAlert(); a.alertStyle = .warning
-        a.messageText = "快捷键未生效"
-        a.informativeText = """
-        \(hotkeyText(ctl.cfg))：\(carbonStatusText(ctl.lastHotkeyStatus))
+        a.messageText = L("快捷键未生效")
+        let hotkeyHelp: String
+        if L10n.isEN {
+            hotkeyHelp = """
+            \(hotkeyText(ctl.cfg)): \(carbonStatusText(ctl.lastHotkeyStatus))
 
-        本程序使用系统级全局热键（Carbon），不需要「辅助功能 / 输入监控」授权。
-        未生效通常是这三种情况：
-        1. 组合被其他 App 占用 —— 在设置里换一个，例如 ⇧⌘B、⌃⌥⌘B；
-        2. 组合没带修饰键 —— 系统要求 ⌘ / ⌃ / ⌥ / ⇧ 至少一个；
-        3. App 刚重装，系统热键表未刷新 —— 退出本程序重开一次。
-        """
-        a.addButton(withTitle: "打开设置")
-        a.addButton(withTitle: "好")
+            This app uses the system-level global hotkey (Carbon), so it needs no Accessibility or Input Monitoring grant.
+            When it doesn't work, it is usually one of these three:
+            1. Another app owns the combo — pick a different one in Settings, e.g. ⇧⌘B or ⌃⌥⌘B;
+            2. The combo has no modifier — macOS requires at least one of ⌘ / ⌃ / ⌥ / ⇧;
+            3. The app was just reinstalled and macOS has not refreshed its hotkey table — quit and relaunch once.
+            """
+        } else {
+            hotkeyHelp = """
+            \(hotkeyText(ctl.cfg))：\(carbonStatusText(ctl.lastHotkeyStatus))
+
+            本程序使用系统级全局热键（Carbon），不需要「辅助功能 / 输入监控」授权。
+            未生效通常是这三种情况：
+            1. 组合被其他 App 占用 —— 在设置里换一个，例如 ⇧⌘B、⌃⌥⌘B；
+            2. 组合没带修饰键 —— 系统要求 ⌘ / ⌃ / ⌥ / ⇧ 至少一个；
+            3. App 刚重装，系统热键表未刷新 —— 退出本程序重开一次。
+            """
+        }
+        a.informativeText = hotkeyHelp
+        a.addButton(withTitle: L("打开设置"))
+        a.addButton(withTitle: L("好"))
         if a.runModal() == .alertFirstButtonReturn { openSettings(nil) }
     }
 }

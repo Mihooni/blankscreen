@@ -8,7 +8,7 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-中文说明: [README.zh-CN.md](README.zh-CN.md)
+Chinese: [README.zh-CN.md](README.zh-CN.md)
 
 ```
 $ blankscreen off      # screen goes black, system keeps running
@@ -45,9 +45,9 @@ The display never sleeps, so the framebuffer keeps rendering and a remote viewer
 
 | Menu item | What it solves | How to use it |
 |---|---|---|
-| **关闭显示器** (Turn display off) | Screen goes black instantly, machine keeps running | Click it, or press ⌃⌥⌘B |
-| **息屏时不睡眠** (Stay awake while blanked) | The system doesn't follow the screen into sleep | Tick once; applies to every blackout after that |
-| **合盖后不睡眠** (Stay awake with the lid closed) | Built-in panel turns off on lid close, machine runs for hours | Tick once; restored automatically after app or system restarts |
+| **Turn Display Off** | Screen goes black instantly, machine keeps running | Click it, or press ⌃⌥⌘B |
+| **Stay Awake While Blanked** | The system doesn't follow the screen into sleep | Tick once; applies to every blackout after that |
+| **Stay Awake with Lid Closed** | Built-in panel turns off on lid close, machine runs for hours | Tick once; restored automatically after app or system restarts |
 
 They never interfere with each other: the lid daemon and the blackout-linked anti-sleep are separate entries in an internal ledger, so turning one off leaves the other running.
 
@@ -55,10 +55,10 @@ They never interfere with each other: the lid daemon and the blackout-linked ant
 
 1. Download `BlankScreen-<version>.dmg` from [Releases](../../releases/latest)
 2. Open it and drag the app into Applications
-3. Click the ☀ icon in the menu bar → **关闭显示器** (Turn display off)
+3. Click the ☀ icon in the menu bar → **Turn Display Off**
 
 The screen goes black. Press ⌃⌥⌘B (or click the icon again) to bring it back.
-For closed-lid use, tick **合盖后不睡眠（长期运行）** — one admin-password prompt installs a privileged helper, and it keeps working from then on.
+For closed-lid use, tick **Stay Awake with Lid Closed (long-running)** — one admin-password prompt installs a privileged helper, and it keeps working from then on.
 
 ## Three ways people actually use it
 
@@ -67,7 +67,7 @@ For closed-lid use, tick **合盖后不睡眠（长期运行）** — one admin-
 Worried you'll forget? A 12-hour fallback timeout restores the display automatically.
 
 **B. Closed in a bag, still working**
-Tick "合盖后不睡眠" → close the lid → **the built-in panel turns itself off** (since v1.5.2, via the SMC lid switch). Downloads, builds and remote sessions keep going; open the lid and brightness is restored.
+Tick "Stay Awake with Lid Closed" → close the lid → **the built-in panel turns itself off** (since v1.5.2, via the SMC lid switch). Downloads, builds and remote sessions keep going; open the lid and brightness is restored.
 If the battery drops below the floor while discharging, it stops and notifies you instead of draining to zero.
 
 **C. Stepping away from the desk**
@@ -94,6 +94,19 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 - **CLI and app share state.** `blankscreen on` over SSH can restore a screen the menu bar app turned off, and vice versa.
 - **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
 
+## Language
+
+**Follows your system**: Chinese system language → Chinese UI; anything else (including English) → English UI. The menu bar app and the CLI agree, with nothing to configure.
+
+To switch it temporarily or permanently:
+
+| Method | Usage |
+|---|---|
+| Environment variable | `BLANKSCREEN_LANG=zh blankscreen doctor` (`zh` / `en`) |
+| Config file | set `"lang": "zh"` in `~/Library/Application Support/blankscreen/config.json` |
+
+The config accepts `auto` (follow the system, default) / `zh` / `en`; the environment variable wins over it.
+
 ## Requirements
 
 - macOS 13 Ventura or later (built as a universal binary: Apple Silicon + Intel)
@@ -114,7 +127,7 @@ so there is nothing to do by hand.
 
 **Option A2 — DMG drag-and-drop.** Download `BlankScreen-<version>.dmg` from
 [Releases](../../releases/latest), open it, and drag the app into Applications.
-Double-click `安装命令行工具.command` inside the image to also install the CLI
+Double-click `Install Command-Line Tool.command` inside the image to also install the CLI
 (one GUI password prompt). If Gatekeeper blocks the first launch, right-click
 the app → **Open**.
 
@@ -157,13 +170,13 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by 
 
 **Menu bar app** — click ☀ / 🌙 in the menu bar; the three core functions are named in plain words:
 
-- **关闭显示器** — black out now, machine keeps running (click again or press the hotkey to restore)
-- **息屏时不睡眠** — while the screen is off, keep the system awake; released automatically on restore
-- **合盖后不睡眠（长期运行）** — keep running with the lid closed, restored after a reboot (see [anti-sleep](#anti-sleep-closed-lid--battery--headless))
-- 安装提权助手 (Install privileged helper, first run) — extends the two above to battery and closed lid (one password prompt)
-- 设置… (Settings) — hotkey combo + key, fallback timeout, battery guard, restore-brightness policy, launch at login
-- 热键自检 (Hotkey self-test) — synthesizes your hotkey once and verifies the delivery path (no side effects)
-- 打开日志 (Open log)
+- **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
+- **Stay Awake While Blanked** — while the screen is off, keep the system awake; released automatically on restore
+- **Stay Awake with Lid Closed (long-running)** — keep running with the lid closed, restored after a reboot (see [anti-sleep](#anti-sleep-closed-lid--battery--headless))
+- **Install Privileged Helper…** (first run) — extends the two above to battery and closed lid (one password prompt)
+- **Settings…** — hotkey combo + key, fallback timeout, battery guard, restore-brightness policy, launch at login
+- **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
+- **Open Log**
 
 **CLI**:
 
@@ -203,7 +216,7 @@ blankscreen nosleep off                    # stop and reset
 
 ### Lid-closed anti-sleep (long-running mode)
 
-In the menu bar app, click **"合盖后不睡眠（长期运行）"** to enable with one click — no terminal needed:
+In the menu bar app, click **"Stay Awake with Lid Closed (long-running)"** to enable with one click — no terminal needed:
 
 - **Closed lid = display off, machine keeps running**: downloads, remote access, external displays and long tasks all keep working
 - **Automatic lid blackout (since v1.5.2)**: the daemon polls the SMC lid switch (MSLD key); on lid close it zeroes the built-in display brightness and restores it when the lid opens — the built-in panel only, external displays are never touched; when the daemon stops (battery floor / timeout / manual off) the brightness is restored too, never leaving a black screen behind
@@ -212,7 +225,7 @@ In the menu bar app, click **"合盖后不睡眠（长期运行）"** to enable 
 - **Independent of blackout linkage**: the lid daemon and blackout-linked anti-sleep are separate entries in the owner ledger, so toggling one never disturbs the other
 - Requires the privileged helper; if missing, the menu walks you through the graphical one-click install (one admin-password prompt)
 
-You can also tick "合盖不睡眠（长期模式）" in the settings panel, or use the CLI:
+You can also tick "Stay awake with lid closed (long-running mode)" in the settings panel, or use the CLI:
 
 ```bash
 blankscreen nosleep on --system            # enable directly (helper required)

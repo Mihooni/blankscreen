@@ -5,7 +5,7 @@
 # 内容:  BlankScreenBar.app（拖到 Applications 即装）
 #        + Applications 快捷方式
 #        + blankscreen 命令行工具
-#        + 安装命令行工具.command（双击弹出系统密码框装 CLI）
+#        + Install Command-Line Tool.command（双击弹出系统密码框装 CLI / double-click to install the CLI）
 #
 # 用法:  ./packaging/make_dmg.sh [版本号]
 #        版本号缺省时取最近的 git tag（去 v 前缀）
@@ -41,28 +41,36 @@ cp build/blankscreen "$STAGE/"
 chmod 755 "$STAGE/blankscreen"
 ln -s /Applications "$STAGE/Applications"
 
-cat > "$STAGE/安装命令行工具.command" << 'EOF'
+cat > "$STAGE/Install Command-Line Tool.command" << 'EOF'
 #!/bin/sh
-# 双击运行：把 blankscreen 装到 Homebrew 前缀（弹系统密码框，一次搞定）
+# Double-click to install blankscreen into the Homebrew prefix (one admin password prompt)
 cd "$(dirname "$0")" || exit 1
 if [ "$(uname -m)" = "arm64" ]; then DEST=/opt/homebrew/bin; else DEST=/usr/local/bin; fi
 if osascript -e "do shell script \"mkdir -p $DEST && cp -f blankscreen '$DEST/blankscreen'\" with administrator privileges"; then
-  osascript -e "display dialog \"✅ 命令行工具已安装到 $DEST/blankscreen\n\n试试: blankscreen nosleep setup\" buttons {\"好\"} default button 1 with title \"BlankScreen\""
+  osascript -e "display dialog \"✅ Installed: $DEST/blankscreen\n\nTry it: blankscreen nosleep setup\" buttons {\"OK\"} default button 1 with title \"BlankScreen\""
 else
-  osascript -e "display dialog \"❌ 已取消或安装失败\" buttons {\"好\"} default button 1 with title \"BlankScreen\""
+  osascript -e "display dialog \"❌ Cancelled or installation failed\" buttons {\"OK\"} default button 1 with title \"BlankScreen\""
 fi
 EOF
-chmod 755 "$STAGE/安装命令行工具.command"
+chmod 755 "$STAGE/Install Command-Line Tool.command"
 
-cat > "$STAGE/使用说明.txt" << 'EOF'
+cat > "$STAGE/Read Me.txt" << 'EOF'
+BlankScreen — turn the display off without putting the Mac to sleep.
 BlankScreen —— 关屏但不睡眠
 
-安装：
-  1. 把 BlankScreenBar.app 拖进右边的 Applications 文件夹
-  2. （可选）双击「安装命令行工具.command」，装好 CLI 后可执行
+Install / 安装:
+  1. Drag BlankScreenBar.app into the Applications folder on the right
+     把 BlankScreenBar.app 拖进右边的 Applications 文件夹
+  2. (Optional) Double-click "Install Command-Line Tool.command" to install the CLI,
+     then run: blankscreen nosleep setup
+     （可选）双击「Install Command-Line Tool.command」装好 CLI，然后执行
      blankscreen nosleep setup 一键开启防睡眠
 
+Click the ☀ / 🌙 menu bar icon to toggle the display; anti-sleep and settings live in the same menu.
 菜单栏图标 ☀ / 🌙 即可开关显示器；防睡眠与设置都在菜单里。
+
+The interface follows your system language (English / Chinese).
+界面语言跟随系统（中 / 英）。
 EOF
 
 # 清掉 AppleDouble / .DS_Store，避免污染镜像

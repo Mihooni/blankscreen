@@ -95,6 +95,21 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 - **CLI 与 App 状态互通**。SSH 里 `blankscreen on` 能唤醒菜单栏 App 关掉的屏幕，反之亦然。
 - **单实例**。重复启动会干净接管，并清理遗留的 `caffeinate` 孤儿进程。
 
+## 界面语言
+
+**跟随系统**：系统语言为中文 → 中文界面；其余语言（含英文）→ 英文界面。菜单栏 App 与命令行工具一致，无需任何设置。
+
+需要临时或固定切换时：
+
+| 方式 | 用法 |
+|---|---|
+| 环境变量 | `BLANKSCREEN_LANG=en blankscreen doctor`（`zh` / `en`） |
+| 配置文件 | `~/Library/Application Support/blankscreen/config.json` 里设 `"lang": "en"` |
+
+配置文件可选 `auto`（跟随系统，默认）/ `zh` / `en`；环境变量优先级最高。
+
+英文界面下三个开关对应：**Turn Display Off** / **Stay Awake While Blanked** / **Stay Awake with Lid Closed**。
+
 ## 环境要求
 
 - macOS 13 Ventura 及以上（universal binary，Apple Silicon 与 Intel 均可）
@@ -114,7 +129,7 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 
 **方式 A2 —— DMG 拖拽安装**：从 [Releases](../../releases/latest) 下载
 `BlankScreen-<版本号>.dmg`，打开后把 App 拖进 Applications 文件夹；
-双击镜像里的「安装命令行工具.command」可顺手装好 CLI（弹一次系统密码框）。
+双击镜像里的「Install Command-Line Tool.command」可顺手装好 CLI（弹一次系统密码框）。
 若 App 首次打开被 Gatekeeper 拦下，右键 → **打开** 即可。
 
 **方式 B —— 源码构建**（需 Xcode Command Line Tools）：
