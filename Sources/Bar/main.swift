@@ -698,7 +698,17 @@ final class ScreenController {
         // 助手缺失（如被手动卸载）则停用标志并明确告知，不留「以为开着其实没开」的状态
         if loadConfig().lidAwake {
             if helperInstalled() {
-                if lidDaemonPid() == nil { _ = setLidAwake(true) }
+                if lidDaemonPid() == nil {
+                    _ = setLidAwake(true)
+                } else if let info = nosleepInfoStatus(), info.level != "system" {
+                    // 守护在跑却是进程级：进程级 caffeinate 挡不住合盖睡眠，
+                    // 「合盖后不睡眠」此时名存实亡。常见成因是守护启动时 helper
+                    // 调用失败（授权过期 / 竞态）。重启一次把它拉回系统级，
+                    // 否则用户会一直带着「以为开着其实没开」的错觉合盖。
+                    blog("bar: 合盖守护降级为进程级（挡不住合盖睡眠），重启以恢复系统级")
+                    _ = setLidAwake(false)
+                    _ = setLidAwake(true)
+                }
             } else {
                 var c = loadConfig(); c.lidAwake = false; saveConfig(c); cfg = c
                 notifyUser(L("「合盖后不睡眠」已停用：提权助手未安装（可能已被卸载）"))

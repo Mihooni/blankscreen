@@ -3,7 +3,8 @@
 // 设计要点:
 //  1. 采用「亮度归零」而非「显示器硬件睡眠」，确保屏幕共享/远程桌面仍能正常抓帧，
 //     且任何按键鼠标都不会意外恢复显示（恢复完全由本程序控制）。
-//  2. 黑屏期间由 caffeinate -di 持有断言，阻止系统空闲睡眠与显示器硬件睡眠。
+//  2. 黑屏期间由 caffeinate -is 持有断言，阻止系统空闲睡眠；不含 -d，
+//     以免把「显示器睡眠」也一并挡住 —— 合盖熄屏正需要显示器能灭。
 //  3. 以 0.5s 周期重设亮度为 0，压制环境光自动亮度。
 //  4. 两种运行形态:
 //     - 常驻服务(launchd): 热键 / CLI 信号 均可切换开关，开机自启
@@ -761,7 +762,30 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     var lidDimmed = false           // 当前处于「已合盖 · 内屏已熄灭」状态
     var lidSaved: Float = 0.5       // 合盖前的内屏亮度
     var lidCloseStreak = 0          // 连续读数滤波：连续两次合盖才动作，防抖动误判
+    var lidFailStreak = 0           // SMC 连续读取失败次数（用于避免刷屏）
     var lidPinTimer: Timer?
+    var lidWakeObserver: NSObjectProtocol?
+
+    /// 读合盖状态，并在连接失效时自愈重连一次。
+    ///
+    /// 为什么需要它：系统睡眠/唤醒后，SMC 的 IOService 连接常常失效，此后
+    /// lidClosed() 一直返回 nil。早先的实现直接 return，既不熄屏也不留任何
+    /// 日志 —— 用户看到的就是「合盖后屏幕一直亮着」，而排查时日志干干净净。
+    func lidClosedHealing() -> Bool? {
+        if let v = lidSMC.lidClosed() { lidFailStreak = 0; return v }
+        lidSMC.close()
+        if lidSMC.open(), let v = lidSMC.lidClosed() {
+            lidFailStreak = 0
+            log(L("lid: SMC 连接已重建（系统睡眠唤醒后连接会失效，已自动恢复）"))
+            return v
+        }
+        lidFailStreak += 1
+        // 每次失败都写日志会在长夜里刷爆日志，只记首次与之后每分钟一次
+        if lidFailStreak == 1 || lidFailStreak % 120 == 0 {
+            log(L("lid: SMC 读取失败且重连未成功，合盖熄屏暂时不可用"))
+        }
+        return nil
+    }
 
     func lidRestoreBrightness(_ retryLog: String) {
         let target = lidSaved
@@ -774,12 +798,14 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         log(retryLog)
     }
 
-    func checkLid() {
+    /// immediate=true 时跳过防抖（系统唤醒后调用：此时盖子已合上一段时间，
+    /// 再等两轮轮询就等于把「屏幕亮着」又延长了两秒）。
+    func checkLid(immediate: Bool = false) {
         guard lidMonitorOn, !stopped else { return }
-        guard let closed = lidSMC.lidClosed() else { return }
+        guard let closed = lidClosedHealing() else { return }
         if closed {
             lidCloseStreak += 1
-            guard lidCloseStreak >= 2, !lidDimmed else { return }
+            guard lidCloseStreak >= 2 || immediate, !lidDimmed else { return }
             let cur = builtinBrightness()
             lidSaved = cur > 0.001 ? cur : 0.5
             if setBuiltinBrightness(0.0) {
@@ -817,6 +843,10 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
             log((L("lid: 守护退出，恢复内屏亮度 ") + "\(lidSaved)"))
             lidRestoreBrightness(L("lid: 错误：退出时内屏亮度恢复失败，请手动调整亮度"))
         }
+        if let ob = lidWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(ob)
+            lidWakeObserver = nil
+        }
         lidSMC.close()
         caff?.terminate(); caff = nil
         try? fm.removeItem(atPath: nosleepPidFile)
@@ -826,9 +856,14 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     }
 
     // Level 1：进程级断言（零权限）。-w 保证本进程一旦退出 caffeinate 自动回收，杜绝孤儿。
+    //
+    // 注意这里是 -is 而不是 -dis：-d 的语义是「阻止显示器睡眠」，与合盖熄屏
+    // 直接冲突 —— 合盖时 macOS 正要关掉显示器，却被这条断言挡住，屏幕就一直
+    // 亮着。我们要阻止的是**系统**睡眠（由 -i/-s 与 disablesleep 负责），
+    // 显示器该不该灭由本程序用亮度主动控制。
     let c = Process()
     c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-    c.arguments = ["-dis", "-w", String(myPid)]
+    c.arguments = ["-is", "-w", String(myPid)]
     try? c.run()
     caff = c
 
@@ -871,9 +906,21 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         lidSMC.close()
     }
 
+    // 合盖时 macOS 会走一遍「尝试睡眠 → 被 disablesleep 拦下 → 唤醒」的流程。
+    // 这期间用户空间定时器被冻结，系统会重新点亮内屏，而等它醒过来时我们的
+    // Timer 早已错过合盖那一刻。所以必须监听唤醒通知，醒来的第一时间重新判断
+    // 并补上熄屏 —— 这正是「合盖后屏幕又亮了」的根因。
+    lidWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+    ) { _ in
+        guard lidMonitorOn, !stopped else { return }
+        log(L("lid: 系统已唤醒，重新检查合盖状态"))
+        checkLid(immediate: true)
+    }
+
     for sig in [SIGTERM, SIGINT, SIGHUP] { signal(sig) { _ in nosleepStopFlag = true } }
 
-    let poll = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+    let poll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
         if nosleepStopFlag { stop(L("收到退出信号"), notifyUser: false); exit(0) }
         checkLid()
     }
