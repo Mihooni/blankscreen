@@ -234,6 +234,29 @@ if BLANKSCREEN_LANG=en "$B" --help 2>/dev/null | grep -q 'CLI usage'; then
 else
     bad "帮助文本未本地化"
 fi
+# 跟随系统语言：用 -AppleLanguages 参数域模拟系统语言。必须清掉 BLANKSCREEN_LANG
+# 才会走到系统判定这一步（smoke.sh 顶部把它锁成了中文）。
+# 回归点：系统语言既非中文也非英文（如日语）时应回落英文界面——曾经因为退回
+# Locale.current（本机区域 zh）而误判成中文。
+sys_ja=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(ja)' 2>/dev/null)
+if printf '%s\n' "$sys_ja" | has_han; then
+    bad "非中英系统语言未回落英文界面（误判为中文）"
+    printf '%s\n' "$sys_ja" | lines_han | head -3 | sed 's/^/      残留: /'
+else
+    ok "非中英系统语言（ja）回落英文界面"
+fi
+sys_en=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(en)' 2>/dev/null)
+if printf '%s\n' "$sys_en" | has_han; then
+    bad "模拟英文系统时仍有中文"
+else
+    ok "跟随系统语言（en）生效"
+fi
+sys_zh=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(zh-Hans)' 2>/dev/null)
+if printf '%s\n' "$sys_zh" | has_han; then
+    ok "跟随系统语言（zh-Hans）生效"
+else
+    bad "模拟中文系统时未输出中文"
+fi
 
 # ---------- 汇总 ----------
 echo

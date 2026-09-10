@@ -38,6 +38,11 @@ enum L10n {
     }
 
     /// 系统首选语言是否为中文。CLI 不是 bundle，读全局 AppleLanguages 更可靠。
+    ///
+    /// 规则：取系统语言列表里第一个「我们支持的语言」——中文（zh/Hans/Hant）→ 中文界面，
+    /// 英文（en）→ 英文界面。整份列表都不含中/英时（日语、法语系统等）默认英文：
+    /// 此时**不能**再退回 Locale.current，否则中国区域码会把非中文系统误判成中文界面
+    /// （实测：模拟系统语言 ja 时曾输出中文）。
     private static func systemPrefersChinese() -> Bool {
         var list: [String] = []
         if let v = CFPreferencesCopyAppValue("AppleLanguages" as CFString,
@@ -50,6 +55,8 @@ enum L10n {
             if s.hasPrefix("zh") || s.contains("hans") || s.contains("hant") { return true }
             if s.hasPrefix("en") { return false }
         }
+        if !list.isEmpty { return false }   // 系统语言既非中文也非英文 → 英文界面
+        // 只有连语言列表都拿不到（极少数 CLI 环境）才退回区域语言
         if let code = Locale.current.language.languageCode?.identifier, code.hasPrefix("zh") {
             return true
         }

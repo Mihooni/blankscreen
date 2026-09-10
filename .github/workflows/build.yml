@@ -11,7 +11,7 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build universal binaries (arm64 + x86_64)
         run: make all
@@ -41,17 +41,17 @@ jobs:
           cp -R build/BlankScreenBar.app dist/
           ditto -c -k --keepParent dist blankscreen-macos.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blankscreen-macos
           path: blankscreen-macos.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blankscreen-installer
           path: build/pkgout/BlankScreen-*.pkg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blankscreen-dmg
           path: build/dmgout/BlankScreen-*.dmg
@@ -65,7 +65,7 @@ jobs:
       id-token: write          # GitHub artifact attestation 必需
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make all
       - name: Build installer (.pkg)
         run: make pkg VERSION=${{ github.ref_name }}
@@ -83,13 +83,13 @@ jobs:
           shasum -a 256 blankscreen-macos.zip BlankScreen-*.pkg BlankScreen-*.dmg > SHA256SUMS
           cat SHA256SUMS
       # 构建来源证明（SLSA）：证明产物由本仓库的 workflow 构建，未经篡改
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             blankscreen-macos.zip
             BlankScreen-*.pkg
             BlankScreen-*.dmg
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             blankscreen-macos.zip
