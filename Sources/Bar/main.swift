@@ -1268,7 +1268,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func icon(blacked: Bool) -> NSImage? {
         let name = blacked ? "moon.fill" : "sun.max.fill"
-        if let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) { return img }
+        // 显式定字号字重：SF Symbol 默认渲染在菜单栏里偏细、与其他图标视觉重量不一致
+        let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        if let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
+            return base.withSymbolConfiguration(cfg)
+        }
         return NSImage(systemSymbolName: "display", accessibilityDescription: nil)
     }
 

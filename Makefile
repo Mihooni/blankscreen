@@ -28,7 +28,7 @@ endif
 APPSRC  = build/BlankScreenBar.app
 DEST    = /Applications/BlankScreenBar.app
 
-.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test clean
+.PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test clean icon
 
 all: cli app
 
@@ -39,7 +39,9 @@ version-file:
 	@mkdir -p Sources/Shared
 	@printf '// 由 Makefile 生成，请勿手改\nlet BS_VERSION = "%s"\nlet BS_COMMIT = "%s"\n' \
 		"$(VERSION)" "$(COMMIT)" > Sources/Shared/Version.swift
-	@sed -i '' 's|<string>[0-9.]*</string><!--VERSION-->|<string>$(VERSION)</string><!--VERSION-->|' Sources/Info.plist 2>/dev/null || true
+	@# 注意：不要写 `sed -i ''`——部分环境下空后缀参数会被误解析，导致替换静默失败
+	@# （错误被 2>/dev/null 吞掉，App 版本号会一直停在旧值）。-i.bak 单参数写法跨环境稳定。
+	@sed -i.bak 's|<string>[0-9.]*</string><!--VERSION-->|<string>$(VERSION)</string><!--VERSION-->|' Sources/Info.plist && rm -f Sources/Info.plist.bak
 	@echo "==> 版本: $(VERSION) ($(COMMIT))"
 
 # 产出可直接分发的 .pkg 安装器（内含 App + CLI，带许可协议）
@@ -50,6 +52,13 @@ pkg: all
 # 产出拖拽安装镜像 .dmg（App + Applications 快捷方式 + CLI 一键安装脚本）
 dmg: all
 	@./packaging/make_dmg.sh $(VERSION)
+
+# 重新生成应用图标（改完 Sources/mkicon.swift 后执行；之后需 make app 才会打进 App）
+icon:
+	@rm -rf build/iconset
+	@swift Sources/mkicon.swift build/iconset
+	@iconutil -c icns build/iconset -o Sources/AppIcon.icns
+	@echo "==> 图标已更新: Sources/AppIcon.icns（执行 make app 后生效）"
 
 # 端到端冒烟测试：构建后跑真实关屏/恢复/防睡眠路径（会短暂黑屏约 4 秒）
 test: cli
