@@ -427,9 +427,23 @@ func runAsAdmin(_ scriptBody: String) -> (ok: Bool, out: String) {
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f)
     } catch { return (false, "无法写入临时脚本: \(error)") }
     defer { try? fm.removeItem(atPath: f) }
-    let out = runCapture("/usr/bin/osascript",
-                         ["-e", "do shell script \"\(f)\" with administrator privileges"])
-    return (out != nil, out ?? "用户取消或授权失败")
+    // 路径含空格（~/Library/Application Support/...），必须整体加引号再交给
+    // do shell script：不加引号会被 sh 拆成「不存在的命令 + 参数」，
+    // osascript 以非 0 退出、stdout 为空——旧实现只看 stdout 是否为 nil，
+    // 于是静默漏装还报「安装完成」（v1.5.2 前 helper 一直没被真正升级的根因）。
+    let safe = f.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", "do shell script \"'\(safe)'\" with administrator privileges"]
+    p.standardInput = FileHandle.nullDevice
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+    do { try p.run() } catch { return (false, "无法启动 osascript: \(error)") }
+    // 必须先读再等：管道缓冲写满会让子进程卡死在 write 上
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    // 以退出码判定成败；输出只用于展示（osascript 的报错文本在 stderr，已合并进来）
+    return (p.terminationStatus == 0, out.isEmpty ? (p.terminationStatus == 0 ? "完成" : "授权失败或被取消") : out)
 }
 
 // MARK: - 防睡眠状态
@@ -1650,6 +1664,10 @@ case "nosleep":
                 print("   提示：取消密码框会中止安装，可重新运行本命令。")
                 exit(1)
             }
+            if helperOutdated() {
+                print("   ⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行")
+                exit(1)
+            }
             print("   完成（电池与合盖现已可防睡眠）")
         }
         var sc = loadConfig()
@@ -1751,6 +1769,12 @@ case "nosleep":
         print(ok ? "安装完成" : "安装失败: \(out)")
         if ok {
             if let d = helperExec("detect") { print("disablesleep 支持情况: \(d)") }
+            // 装后校验：提权链路（密码框 + root 脚本）环节多，必须回读真实结果，
+            // 不能让「命令成功但助手没装上」的静默失败溜过去
+            if helperOutdated() {
+                print("⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行")
+                exit(1)
+            }
             if !systemSleepDisabled() { print("当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）") }
         }
         exit(ok ? 0 : 1)
