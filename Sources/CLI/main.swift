@@ -122,10 +122,14 @@ struct Config: Codable {
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
+    // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
     var lidAwake: Bool = false
-    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en                               // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
+    // 合盖时熄灭内屏。与 lidAwake 分离：熄屏由合盖守护执行，
+    // 关掉它则合盖只保持机器运转、内屏维持原亮度（熄屏异常时的退路）。
+    var lidBlackout: Bool = true
+    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lang }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -888,7 +892,13 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     // 合盖检测启用：SMC 读得到 MSLD 才开（笔记本）。台式机 / 虚拟机读不到，静默禁用。
     // BS_SIMULATE_LID_CLOSED 存在时无条件启用（冒烟测试驱动熄屏/恢复路径）。
     let simLid = ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] != nil
-    if lidSMC.open(), lidSMC.lidClosed() != nil {
+    // 「合盖后黑屏」是独立开关：关掉时机器照样不睡，只是不再主动熄屏
+    // （个别机型熄屏后亮度回不来，这条就是退路）。
+    let blackoutOn = loadConfig().lidBlackout
+    if !blackoutOn && !simLid {
+        log(L("lid: 设置中已关闭「合盖时熄灭内屏」，本次只保持机器运行，不干预屏幕亮度"))
+        lidSMC.close()
+    } else if lidSMC.open(), lidSMC.lidClosed() != nil {
         lidMonitorOn = true
         let nowClosed = lidSMC.lidClosed() == true
         log((L("lid: SMC 合盖检测已启用（当前：") + "\(nowClosed ? L("已合盖") : L("开盖"))" + L("）")))

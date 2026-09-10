@@ -93,10 +93,11 @@ struct Config: Codable {
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
-    var lidAwake: Bool = false
-    var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en               // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
+    var lidAwake: Bool = false                           // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
+    var lidBlackout: Bool = true                         // 合盖时熄灭内屏（与 lidAwake 分离的独立开关）
+    var lang: String = "auto"                            // 界面语言：auto=跟随系统 / zh / en
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lang }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -107,6 +108,7 @@ struct Config: Codable {
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
+        lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
         lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
     }
 }
@@ -837,6 +839,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var restorePop: NSPopUpButton!
     private var nosleepBtn: NSButton!
     private var lidBtn: NSButton!
+    private var lidBlackoutBtn: NSButton!
     private var helperLabel: NSTextField!
     private var helperBtn: NSButton!
     private var restoreSlider: NSSlider!
@@ -863,7 +866,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     }
 
     private func build() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 730),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 830),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = L("BlankScreen 设置")
         w.delegate = self
@@ -923,13 +926,15 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         let battTip = wrapLabel(L("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。"))
         root.addArrangedSubview(battTip)
 
-        // —— 防睡眠
-        root.addArrangedSubview(section(L("防睡眠（阻止系统睡眠）")))
-        nosleepBtn = NSButton(checkboxWithTitle: L("息屏时不睡眠（每次息屏/关屏自动生效）"), target: self, action: #selector(onNosleepToggled(_:)))
-        root.addArrangedSubview(nosleepBtn)
-        lidBtn = NSButton(checkboxWithTitle: L("合盖后不睡眠（长期模式，重启自动恢复）"), target: self, action: #selector(onLidToggled(_:)))
+        // —— 合盖行为：黑屏与不睡眠拆成两项，各自可见可控
+        root.addArrangedSubview(section(L("合盖行为")))
+        lidBtn = NSButton(checkboxWithTitle: L("合盖后不睡眠（长期运行，重启自动恢复）"), target: self, action: #selector(onLidToggled(_:)))
         root.addArrangedSubview(lidBtn)
-        root.addArrangedSubview(wrapLabel(L("开启后合盖时内屏熄灭、机器持续运行——下载、远程访问、外接显示照常工作。") +
+        lidBlackoutBtn = NSButton(checkboxWithTitle: L("合盖时熄灭内屏"), target: self, action: #selector(onLidBlackoutToggled(_:)))
+        root.addArrangedSubview(lidBlackoutBtn)
+        root.addArrangedSubview(wrapLabel(
+            L("开启后合盖不再休眠：内屏熄灭、机器持续运行——下载、远程访问、外接显示器照常工作。") +
+            L("「熄灭内屏」由合盖守护执行，因此需要先开启上一项；个别机型熄屏后亮度回不来时，可单独关掉它。") +
             L("建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")))
 
         let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
@@ -938,6 +943,11 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(helperRow)
         helperLabel = wrapLabel("")
         root.addArrangedSubview(helperLabel)
+
+        // —— 防睡眠
+        root.addArrangedSubview(section(L("防睡眠（阻止系统睡眠）")))
+        nosleepBtn = NSButton(checkboxWithTitle: L("息屏时不睡眠（每次息屏/关屏自动生效）"), target: self, action: #selector(onNosleepToggled(_:)))
+        root.addArrangedSubview(nosleepBtn)
 
         // —— 恢复亮度
         root.addArrangedSubview(section(L("恢复后的亮度")))
@@ -1033,6 +1043,9 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         loginBtn.state = isLoginItemEnabled() ? .on : .off
         syncNosleep()
         lidBtn.state = ctl.lidOn ? .on : .off
+        lidBlackoutBtn.state = cfg.lidBlackout ? .on : .off
+        // 熄屏由合盖守护执行，守护没开时这一项无从生效——禁用，避免「勾了却没反应」
+        lidBlackoutBtn.isEnabled = ctl.lidOn
         refreshPerm()
     }
 
@@ -1078,8 +1091,30 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         if ctl.setLidAwake(want) {
             cfg = ctl.cfg
             commit()
+            lidBlackoutBtn.isEnabled = want
         } else {
             lidBtn.state = want ? .off : .on
+        }
+    }
+
+    /// 「合盖时熄灭内屏」。守护在启动时读一次该开关决定要不要熄屏，
+    /// 所以改动后必须重启守护；关掉时重启也会顺带把亮度复位，
+    /// 否则刚刚熄灭的屏幕会一直黑着。
+    @objc private func onLidBlackoutToggled(_ sender: Any?) {
+        cfg.lidBlackout = (lidBlackoutBtn.state == .on)
+        ctl.cfg = cfg
+        commit()
+        guard ctl.lidOn else { return }
+        _ = ctl.setLidAwake(false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            if self.ctl.setLidAwake(true) {
+                self.cfg = self.ctl.cfg
+                self.lidBtn.state = self.ctl.lidOn ? .on : .off
+            } else {
+                self.lidBlackoutBtn.state = self.cfg.lidBlackout ? .on : .off
+            }
+            self.lidBlackoutBtn.isEnabled = self.ctl.lidOn
         }
     }
 
