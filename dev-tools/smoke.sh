@@ -211,14 +211,20 @@ rm -rf "$tmp_assets"
 # ---------- 10. 本地化 ----------
 echo
 echo "【10】本地化（界面语言跟随系统，可用 BLANKSCREEN_LANG 覆盖）"
+# 汉字检测必须用 Perl 的 \p{Han}：grep 的字符区间 [一-鿿] 在 CI 的 C locale 下
+# 会把 emoji 和 ⌃⌥⌘ 之类的符号也算成中文（实测误判 ✅ / ⚠️ / —）。
+has_han() { perl -CSD -ne 'BEGIN { $f = 0 } $f++ if /\p{Han}/; END { exit($f ? 0 : 1) }'; }
+lines_han() { perl -CSD -ne 'print "$.: $_" if /\p{Han}/'; }
+
 en_out=$(BLANKSCREEN_LANG=en "$B" doctor 2>/dev/null)
-if printf '%s' "$en_out" | grep -q '[一-鿿]'; then
+if printf '%s\n' "$en_out" | has_han; then
     bad "英文模式下仍有中文残留"
-    printf '%s\n' "$en_out" | grep -n '[一-鿿]' | head -5 | sed 's/^/      残留: /'
+    printf '%s\n' "$en_out" | lines_han | head -5 | sed 's/^/      残留: /'
 else
     ok "英文模式输出无中文残留"
 fi
-if BLANKSCREEN_LANG=zh "$B" doctor 2>/dev/null | grep -q '关屏能力'; then
+zh_out=$(BLANKSCREEN_LANG=zh "$B" doctor 2>/dev/null)
+if printf '%s\n' "$zh_out" | has_han; then
     ok "中文模式输出为中文"
 else
     bad "中文模式未输出中文"
