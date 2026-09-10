@@ -29,6 +29,12 @@ let sudoersPath = "/etc/sudoers.d/blankscreen"
 // 关屏被拒绝（电量过低 / 亮度接口不可用）时的回传：CLI off 读完即清
 let rejectFile = base + "/reject"
 let barPlist = home + "/Library/LaunchAgents/com.blankscreen.bar.plist"
+// 合盖模式托管的 CLI 守护进程的 pid 文件（与 CLI 命名一致）
+let nosleepPidFile = base + "/nosleep.pid"
+/// CLI 二进制路径：合盖模式以独立的 CLI 守护进程持有 disablesleep，
+/// 从而在持有者账本里与黑屏联动（App 自身 pid）互不干扰。
+let cliCandidates = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+let cliPath: String = cliCandidates.first(where: { fm.isExecutableFile(atPath: $0) }) ?? cliCandidates[0]
 
 /// 以 launchd 实际注册状态为准：plist 文件存在但没 bootstrap 时，开机并不会启动
 func isLoginItemEnabled() -> Bool {
@@ -87,8 +93,9 @@ struct Config: Codable {
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
+    var lidAwake: Bool = false               // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -98,6 +105,7 @@ struct Config: Codable {
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
+        lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
     }
 }
 let MOD_CTRL: UInt64  = 1 << 18
@@ -321,6 +329,87 @@ final class ScreenController {
     var nosleepSystemOn = false
     var nosleepOn = false
     var nosleepAuto = false            // 由「关屏联动」开启时为 true，恢复显示时随之关闭
+
+    // MARK: 合盖不睡眠（长期模式）
+    //
+    // 委托一个独立的 CLI 系统级守护（nosleep-daemon --system）持有 disablesleep：
+    // 独立 pid = 持有者账本里的独立条目，与黑屏联动的 App 侧防睡眠互不干扰；
+    // App 退出 / 重启都不影响它，重启电脑后由本函数按持久标志自动恢复。
+    func lidDaemonPid() -> Int32? {
+        guard let s = try? String(contentsOfFile: nosleepPidFile, encoding: .utf8),
+              let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+              kill(pid, 0) == 0 else { return nil }
+        return pid
+    }
+
+    /// 守护写入的状态行：level|since|systemOn。用于确认合盖守护真的到达系统级。
+    func nosleepInfoStatus() -> (level: String, systemOn: Bool)? {
+        guard lidDaemonPid() != nil,
+              let s = try? String(contentsOfFile: base + "/nosleep.state", encoding: .utf8) else { return nil }
+        let p = s.split(separator: "|").map(String.init)
+        return (level: p.count > 0 ? p[0] : "caffeinate",
+                systemOn: p.count > 2 ? p[2] == "1" : false)
+    }
+
+    var lidOn: Bool { cfg.lidAwake && lidDaemonPid() != nil }
+
+    @discardableResult
+    func setLidAwake(_ on: Bool) -> Bool {
+        var c = loadConfig()
+        guard let cli = fm.isExecutableFile(atPath: cliPath) ? cliPath : nil else {
+            blog("bar: 合盖模式需要命令行工具")
+            return false
+        }
+        if on {
+            guard helperInstalled() else {
+                blog("bar: 合盖模式需要提权助手（覆盖合盖睡眠必须 root）")
+                return false
+            }
+            if c.batteryFloor > 0 {
+                let b = batteryStatus()
+                if b.onBattery && b.discharging && b.percent <= c.batteryFloor {
+                    blog("bar: 电量 \(b.percent)% 低于下限，暂不能开启合盖模式")
+                    return false
+                }
+            }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: cli)
+            p.arguments = ["nosleep", "on", "--system"]
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run(); p.waitUntilExit() } catch { blog("bar: 启动合盖守护失败 \(error)"); return false }
+            guard lidDaemonPid() != nil else {
+                blog("bar: 合盖守护启动未确认，详见 CLI 日志")
+                return false
+            }
+            // 必须确认到达系统级：降级成进程级时合盖照样睡，用户会带着错误预期合盖
+            if let info = nosleepInfoStatus(), info.level != "system" {
+                blog("bar: 合盖守护降级为进程级（helper 调用失败），回滚")
+                let q = Process()
+                q.executableURL = URL(fileURLWithPath: cli)
+                q.arguments = ["nosleep", "off"]
+                q.standardOutput = FileHandle.nullDevice; q.standardError = FileHandle.nullDevice
+                q.standardInput = FileHandle.nullDevice
+                try? q.run(); q.waitUntilExit()
+                return false
+            }
+            c.lidAwake = true
+            blog("bar: 合盖不睡眠已开启 pid=\(lidDaemonPid() ?? 0)")
+        } else {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: cli)
+            p.arguments = ["nosleep", "off"]
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run(); p.waitUntilExit() } catch { blog("bar: 停止合盖守护失败 \(error)") }
+            c.lidAwake = false
+            blog("bar: 合盖不睡眠已关闭")
+        }
+        saveConfig(c)
+        cfg = c
+        onStateChange?()
+        return true
+    }
 
     func helperInstalled() -> Bool {
         // sudoers 只判存在、不能读内容：0440 root:wheel 对普通用户不可读，读会误判未安装
@@ -603,6 +692,17 @@ final class ScreenController {
         try? fm.removeItem(atPath: commandFile)
         installHotkey()
 
+        // 合盖模式是持久标志：App 重启 / 电脑重启后自动恢复守护；
+        // 助手缺失（如被手动卸载）则停用标志并明确告知，不留「以为开着其实没开」的状态
+        if loadConfig().lidAwake {
+            if helperInstalled() {
+                if lidDaemonPid() == nil { _ = setLidAwake(true) }
+            } else {
+                var c = loadConfig(); c.lidAwake = false; saveConfig(c); cfg = c
+                notifyUser("合盖不睡眠已停用：提权助手未安装（可能已被卸载）")
+            }
+        }
+
         // 指令走命令文件：SIGUSR1/USR2 必须显式忽略（默认行为是终止进程），
         // 真正的开关动作由下方 Timer 轮询 command 文件完成
         for sig in [SIGUSR1, SIGUSR2, SIGHUP] { signal(sig, SIG_IGN) }
@@ -724,6 +824,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var batteryPop: NSPopUpButton!
     private var restorePop: NSPopUpButton!
     private var nosleepBtn: NSButton!
+    private var lidBtn: NSButton!
     private var helperLabel: NSTextField!
     private var helperBtn: NSButton!
     private var restoreSlider: NSSlider!
@@ -814,6 +915,10 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(section("防睡眠（阻止系统睡眠）"))
         nosleepBtn = NSButton(checkboxWithTitle: "关屏时同时阻止系统睡眠", target: self, action: #selector(onNosleepToggled(_:)))
         root.addArrangedSubview(nosleepBtn)
+        lidBtn = NSButton(checkboxWithTitle: "合盖不睡眠（长期模式，重启自动恢复）", target: self, action: #selector(onLidToggled(_:)))
+        root.addArrangedSubview(lidBtn)
+        root.addArrangedSubview(wrapLabel("开启后合盖时内屏熄灭、机器持续运行——下载、远程访问、外接显示照常工作。" +
+            "建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。"))
 
         let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
         helperBtn = NSButton(title: "安装提权助手…", target: self, action: #selector(onInstallHelper(_:)))
@@ -915,6 +1020,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
         loginBtn.state = isLoginItemEnabled() ? .on : .off
         syncNosleep()
+        lidBtn.state = ctl.lidOn ? .on : .off
         refreshPerm()
     }
 
@@ -943,6 +1049,26 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         commit()
         // 已处于黑屏时立即生效，不必等下次关屏
         if cfg.autoNosleep && ctl.blacked { ctl.startNosleep(auto: true) }
+    }
+
+    /// 设置面板里的合盖模式开关。助手未安装时引导到下方安装按钮。
+    @objc private func onLidToggled(_ sender: Any?) {
+        let want = lidBtn.state == .on
+        if want && !ctl.helperInstalled() {
+            lidBtn.state = .off
+            let a = NSAlert()
+            a.messageText = "合盖不睡眠需要提权助手"
+            a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
+                "点击下方「安装提权助手」（弹一次系统密码框）后再开启本项。"
+            a.runModal()
+            return
+        }
+        if ctl.setLidAwake(want) {
+            cfg = ctl.cfg
+            commit()
+        } else {
+            lidBtn.state = want ? .off : .on
+        }
     }
 
     /// 调用 CLI 完成提权安装：密码框由系统弹出，App 不接触凭据
@@ -1086,6 +1212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
     private var nosleepItem: NSMenuItem!
+    private var lidItem: NSMenuItem!
     private var setupItem: NSMenuItem!
     private var stateItem: NSMenuItem!
     private var loginItem: NSMenuItem!
@@ -1155,6 +1282,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nosleepItem = NSMenuItem(title: "防睡眠", action: #selector(toggleNosleep(_:)), keyEquivalent: "")
         nosleepItem.target = self
         m.addItem(nosleepItem)
+        // 合盖模式：长期持久的「合盖也不睡」，由独立 CLI 守护持有，重启自动恢复
+        lidItem = NSMenuItem(title: "合盖不睡眠（长期运行）", action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
+        lidItem.target = self
+        m.addItem(lidItem)
         // 一键到位：装助手 + 开关屏联动 + 立即防睡眠。助手装好后此入口隐藏（设置面板仍可卸载）。
         setupItem = NSMenuItem(title: "一键防睡眠（安装提权助手…）", action: #selector(runSetup(_:)), keyEquivalent: "")
         setupItem.target = self
@@ -1191,6 +1322,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nosleepItem.title = ctl.nosleepOn
             ? "防睡眠（\(ctl.nosleepLevelText)）"
             : "防睡眠 —— 阻止系统睡眠"
+        lidItem.state = ctl.lidOn ? .on : .off
+        lidItem.title = ctl.lidOn
+            ? "合盖不睡眠（长期运行）✓"
+            : "合盖不睡眠（长期运行）"
         setupItem.isHidden = ctl.helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
@@ -1260,6 +1395,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 notifyUser("防睡眠已开启（进程级）：仅在本机接电源时有效。" +
                            "要覆盖电池与合盖，请在「设置」里安装提权助手。")
             }
+        }
+        refreshUI()
+    }
+
+    /// 合盖不睡眠（长期模式）：一键开关，无需终端。
+    /// 未装提权助手时引导走「一键防睡眠」的图形化安装，装完再点一次即可开启。
+    @objc private func toggleLidAwake(_ sender: Any?) {
+        if loadConfig().lidAwake {
+            _ = ctl.setLidAwake(false)
+            notifyUser("合盖不睡眠已关闭：合盖后将恢复正常睡眠。")
+            refreshUI()
+            return
+        }
+        guard ctl.helperInstalled() else {
+            let a = NSAlert()
+            a.messageText = "合盖不睡眠需要提权助手"
+            a.informativeText = "合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。" +
+                "点击「一键防睡眠」安装（弹一次系统密码框，仅授权单个脚本的固定参数），装完后再点本项即可。"
+            a.addButton(withTitle: "一键安装并开启")
+            a.addButton(withTitle: "取消")
+            if a.runModal() == .alertFirstButtonReturn {
+                runSetup(sender)
+                // runSetup 的 setup 流程已包含「立即开启系统级防睡眠」；再把持久标志写上
+                if ctl.lidDaemonPid() != nil || ctl.helperInstalled() {
+                    _ = ctl.setLidAwake(true)
+                }
+            }
+            refreshUI()
+            return
+        }
+        if ctl.setLidAwake(true) {
+            let floor = ctl.cfg.batteryFloor
+            notifyUser("合盖不睡眠已开启：合盖后内屏关闭、机器持续运行（下载 / 远程 / 外接显示均可用）。" +
+                       (floor > 0 ? "电池放电低于 \(floor)% 会自动停止。" : ""))
+        } else {
+            let a = NSAlert()
+            a.alertStyle = .warning
+            a.messageText = "合盖不睡眠开启失败"
+            a.informativeText = "可能原因：电池电量低于下限 / 守护启动未确认。\n详见「打开日志」。"
+            a.runModal()
         }
         refreshUI()
     }

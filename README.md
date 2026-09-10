@@ -137,6 +137,24 @@ blankscreen nosleep off                    # stop and reset
 
 The menu bar app offers the same one-click entry ("一键防睡眠") when the helper is not installed yet.
 
+### Lid-closed anti-sleep (long-running mode)
+
+In the menu bar app, click **"合盖不睡眠（长期运行）"** to enable with one click — no terminal needed:
+
+- **Closed lid = display off, machine keeps running**: downloads, remote access, external displays and long tasks all keep working
+- **Persistent**: the flag is saved in config; the daemon is restored automatically after app or system restarts
+- **Safety net**: auto-stops with a notification when the battery (discharging) drops below the floor (default 20%); turning it off resets `disablesleep`
+- **Independent of blackout linkage**: the lid daemon and blackout-linked anti-sleep are separate entries in the owner ledger, so toggling one never disturbs the other
+- Requires the privileged helper; if missing, the menu walks you through the graphical one-click install (one admin-password prompt)
+
+You can also tick "合盖不睡眠（长期模式）" in the settings panel, or use the CLI:
+
+```bash
+blankscreen nosleep on --system            # enable directly (helper required)
+blankscreen nosleep status                 # shows the lid-mode state
+blankscreen nosleep off                    # stop and reset
+```
+
 **Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
 
 ```bash

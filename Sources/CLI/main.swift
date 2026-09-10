@@ -120,8 +120,9 @@ struct Config: Codable {
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
     var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
+    var lidAwake: Bool = false                               // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -131,6 +132,7 @@ struct Config: Codable {
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
+        lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
     }
 }
 func loadConfig() -> Config {
@@ -631,7 +633,7 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
             let b = batteryStatus()
             guard b.onBattery, b.discharging, b.percent <= cfg.batteryFloor else { return }
             let m = "电量 \(b.percent)% 已达下限 \(cfg.batteryFloor)%，自动停止防睡眠"
-            log(m); stop(m, notifyUser: true); exit(0)
+            log(m); clearLidAwake(); stop(m, notifyUser: true); exit(0)
         }
         RunLoop.main.add(g, forMode: .common)
     }
@@ -639,10 +641,18 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     if let t = timeout, t > 0 {
         Timer.scheduledTimer(withTimeInterval: t, repeats: false) { _ in
             log("nosleep: 超时 \(Int(t))s")
+            clearLidAwake()
             stop("已到设定时长 \(Int(t)) 秒", notifyUser: true); exit(0)
         }
     }
     runAppLoop()
+}
+
+/// 合盖模式的持久标志。凡防睡眠自动结束（电量 / 超时 / 手动 off）都必须清除，
+/// 否则菜单栏 App 会在下次启动时把它当作仍然想要的模式重新拉起。
+func clearLidAwake() {
+    var c = loadConfig()
+    if c.lidAwake { c.lidAwake = false; saveConfig(c) }
 }
 
 /// fork 自身启动 nosleep-daemon 并等待确认（stdio 必须全部丢弃，
@@ -1449,6 +1459,8 @@ case "nosleep":
         print("✅ 一键配置完成。查看状态: blankscreen nosleep status")
 
     case "off":
+        // 无论守护是否在跑，「off」都表达「不再需要防睡眠」——持久标志必须一起清
+        clearLidAwake()
         guard let pid = nosleepPid() else {
             // 守护进程没了但全局开关可能还开着——这是必须补救的残留态
             recoverStaleNosleep()
@@ -1465,6 +1477,7 @@ case "nosleep":
         let b = batteryStatus()
         let helper = helperInstalled()
         print("防睡眠: \(nosleepPid() != nil ? "已开启" : "未开启")")
+        print("  合盖模式: \(loadConfig().lidAwake ? "开（重启后自动恢复）" : "关")（菜单栏 App 可一键开关）")
         if let info = nosleepInfo() {
             let mins = Int(Date().timeIntervalSince(info.since) / 60)
             print("  层级: \(info.level == "system" ? "系统级（含电池与合盖）" : "进程级（仅电源适配器）")")
