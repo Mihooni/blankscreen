@@ -1,4 +1,4 @@
-# blankscreen —— 关屏但不睡眠
+# lidkeep —— 关屏但不睡眠
 # 用法:
 #   make            构建 CLI + 菜单栏 App（universal binary）
 #   make pkg        产出可分发的 .pkg 安装器（App + CLI，带许可协议）
@@ -25,19 +25,19 @@ BINDIR  := /opt/homebrew/bin
 else
 BINDIR  := /usr/local/bin
 endif
-APPSRC  = build/BlankScreenBar.app
-DEST    = /Applications/BlankScreenBar.app
+APPSRC  = build/LidKeep.app
+DEST    = /Applications/LidKeep.app
 
 .PHONY: all cli app pkg dmg install install-cli uninstall dev-tools test clean icon
 
 all: cli app
 
-# 把版本写进二进制与 App 的 Info.plist（`blankscreen version` / 关于面板会显示）
+# 把版本写进二进制与 App 的 Info.plist（`lidkeep version` / 关于面板会显示）
 .PHONY: version-file
 version-file:
 	@# Version.swift 是构建产物（已 gitignore），目录可能不存在于干净的 checkout 中
 	@mkdir -p Sources/Shared
-	@printf '// 由 Makefile 生成，请勿手改\nlet BS_VERSION = "%s"\nlet BS_COMMIT = "%s"\n' \
+	@printf '// 由 Makefile 生成，请勿手改\nlet LK_VERSION = "%s"\nlet LK_COMMIT = "%s"\n' \
 		"$(VERSION)" "$(COMMIT)" > Sources/Shared/Version.swift
 	@# 注意：不要写 `sed -i ''`——部分环境下空后缀参数会被误解析，导致替换静默失败
 	@# （错误被 2>/dev/null 吞掉，App 版本号会一直停在旧值）。-i.bak 单参数写法跨环境稳定。
@@ -55,9 +55,10 @@ dmg: all
 
 # 重新生成应用图标（改完 Sources/mkicon.swift 后执行；之后需 make app 才会打进 App）
 icon:
-	@rm -rf build/iconset
-	@swift Sources/mkicon.swift build/iconset
-	@iconutil -c icns build/iconset -o Sources/AppIcon.icns
+	@# 输出目录必须以 .iconset 结尾：iconutil 对裸目录名直接报 Invalid Iconset
+	@rm -rf build/AppIcon.iconset
+	@swift Sources/mkicon.swift build/AppIcon.iconset
+	@iconutil -c icns build/AppIcon.iconset -o Sources/AppIcon.icns
 	@echo "==> 图标已更新: Sources/AppIcon.icns（执行 make app 后生效）"
 
 # 端到端冒烟测试：构建后跑真实关屏/恢复/防睡眠路径（会短暂黑屏约 4 秒）
@@ -75,43 +76,43 @@ endef
 # 源码按 target 分目录：Swift 只有名为 main.swift 的文件允许顶层代码，
 # 因此 CLI 与菜单栏 App 各有自己的 main.swift，共享代码放 Sources/Shared/。
 cli: version-file
-	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift,blankscreen,build/blankscreen)
+	$(call compile-universal,Sources/CLI/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift,lidkeep,build/lidkeep)
 
-app: build/BlankScreenBar.app
+app: build/LidKeep.app
 
-build/BlankScreenBar.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns version-file
-	@mkdir -p build/BlankScreenBar.app/Contents/MacOS build/BlankScreenBar.app/Contents/Resources
-	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift -o build/bsb_$(t);)
-	lipo -create $(foreach t,$(TARGETS),build/bsb_$(t)) -output build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
-	cp Sources/Info.plist build/BlankScreenBar.app/Contents/Info.plist
-	cp Sources/AppIcon.icns build/BlankScreenBar.app/Contents/Resources/AppIcon.icns
-	-codesign --force --deep -s - build/BlankScreenBar.app 2>/dev/null
-	@echo "==> 构建完成: build/BlankScreenBar.app"
+build/LidKeep.app: Sources/Bar/main.swift Sources/Info.plist Sources/AppIcon.icns version-file
+	@mkdir -p build/LidKeep.app/Contents/MacOS build/LidKeep.app/Contents/Resources
+	$(foreach t,$(TARGETS),$(CC) -O -target $(t) Sources/Bar/main.swift Sources/Shared/Version.swift Sources/Shared/L10n.swift -o build/lk_$(t);)
+	lipo -create $(foreach t,$(TARGETS),build/lk_$(t)) -output build/LidKeep.app/Contents/MacOS/LidKeep
+	cp Sources/Info.plist build/LidKeep.app/Contents/Info.plist
+	cp Sources/AppIcon.icns build/LidKeep.app/Contents/Resources/AppIcon.icns
+	-codesign --force --deep -s - build/LidKeep.app 2>/dev/null
+	@echo "==> 构建完成: build/LidKeep.app"
 
 install: cli app install-cli
 	@# 先删后装：直接覆盖正在运行的可执行文件会因签名缓存失效被内核 kill（exit 137）
-	-pkill -f "$(DEST)/Contents/MacOS/BlankScreenBar" 2>/dev/null || true
+	-pkill -f "$(DEST)/Contents/MacOS/LidKeep" 2>/dev/null || true
 	@sleep 1
 	-rm -rf "$(DEST)"
 	cp -R "$(APPSRC)" "$(DEST)"
 	-xattr -dr com.apple.quarantine "$(DEST)" 2>/dev/null || true
-	@echo "==> 已安装: $(DEST) 和 $(BINDIR)/blankscreen"
-	@echo "==> 启动:   open -a BlankScreenBar  （或在设置里勾选「登录时自动启动」）"
+	@echo "==> 已安装: $(DEST) 和 $(BINDIR)/lidkeep"
+	@echo "==> 启动:   open -a LidKeep  （或在设置里勾选「登录时自动启动」）"
 
 install-cli:
 	@mkdir -p $(BINDIR)
-	install -m 0755 build/blankscreen $(BINDIR)/blankscreen
+	install -m 0755 build/lidkeep $(BINDIR)/lidkeep
 
 uninstall:
-	-launchctl bootout gui/$$(id -u)/com.blankscreen.bar 2>/dev/null || true
-	-launchctl bootout gui/$$(id -u)/com.blankscreen.agent 2>/dev/null || true
-	-rm -f ~/Library/LaunchAgents/com.blankscreen.bar.plist
-	-rm -f ~/Library/LaunchAgents/com.blankscreen.agent.plist
-	-pkill -f "$(DEST)/Contents/MacOS/BlankScreenBar" 2>/dev/null || true
+	-launchctl bootout gui/$$(id -u)/com.lidkeep.bar 2>/dev/null || true
+	-launchctl bootout gui/$$(id -u)/com.lidkeep.agent 2>/dev/null || true
+	-rm -f ~/Library/LaunchAgents/com.lidkeep.bar.plist
+	-rm -f ~/Library/LaunchAgents/com.lidkeep.agent.plist
+	-pkill -f "$(DEST)/Contents/MacOS/LidKeep" 2>/dev/null || true
 	@sleep 1
 	-rm -rf "$(DEST)"
-	-rm -f $(BINDIR)/blankscreen
-	@echo "==> 已卸载（配置与日志保留在 ~/Library/Application Support/blankscreen/，可手动删除）"
+	-rm -f $(BINDIR)/lidkeep
+	@echo "==> 已卸载（配置与日志保留在 ~/Library/Application Support/LidKeep/，可手动删除）"
 
 dev-tools:
 	@mkdir -p build/dev-tools

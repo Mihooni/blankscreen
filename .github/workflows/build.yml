@@ -20,13 +20,13 @@ jobs:
         run: make test
 
       - name: Show doctor report
-        run: ./build/blankscreen doctor || true
+        run: ./build/lidkeep doctor || true
 
       - name: Verify architectures
         run: |
-          lipo -info build/blankscreen
-          lipo -info build/BlankScreenBar.app/Contents/MacOS/BlankScreenBar
-          ./build/blankscreen version
+          lipo -info build/lidkeep
+          lipo -info build/LidKeep.app/Contents/MacOS/LidKeep
+          ./build/lidkeep version
 
       - name: Build installer (.pkg)
         run: make pkg
@@ -37,24 +37,24 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build/blankscreen dist/
-          cp -R build/BlankScreenBar.app dist/
-          ditto -c -k --keepParent dist blankscreen-macos.zip
+          cp build/lidkeep dist/
+          cp -R build/LidKeep.app dist/
+          ditto -c -k --keepParent dist lidkeep-macos.zip
 
       - uses: actions/upload-artifact@v7
         with:
-          name: blankscreen-macos
-          path: blankscreen-macos.zip
+          name: lidkeep-macos
+          path: lidkeep-macos.zip
 
       - uses: actions/upload-artifact@v7
         with:
-          name: blankscreen-installer
-          path: build/pkgout/BlankScreen-*.pkg
+          name: lidkeep-installer
+          path: build/pkgout/LidKeep-*.pkg
 
       - uses: actions/upload-artifact@v7
         with:
-          name: blankscreen-dmg
-          path: build/dmgout/BlankScreen-*.dmg
+          name: lidkeep-dmg
+          path: build/dmgout/LidKeep-*.dmg
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -74,26 +74,26 @@ jobs:
       - name: Package release
         run: |
           mkdir -p dist
-          cp build/blankscreen dist/
-          cp -R build/BlankScreenBar.app dist/
-          ditto -c -k --keepParent dist blankscreen-macos.zip
-          cp build/pkgout/BlankScreen-*.pkg .
-          cp build/dmgout/BlankScreen-*.dmg .
+          cp build/lidkeep dist/
+          cp -R build/LidKeep.app dist/
+          ditto -c -k --keepParent dist lidkeep-macos.zip
+          cp build/pkgout/LidKeep-*.pkg .
+          cp build/dmgout/LidKeep-*.dmg .
           # 生成校验和：用户下载后可 `shasum -a 256 -c SHA256SUMS` 验证完整性
-          shasum -a 256 blankscreen-macos.zip BlankScreen-*.pkg BlankScreen-*.dmg > SHA256SUMS
+          shasum -a 256 lidkeep-macos.zip LidKeep-*.pkg LidKeep-*.dmg > SHA256SUMS
           cat SHA256SUMS
       # 构建来源证明（SLSA）：证明产物由本仓库的 workflow 构建，未经篡改
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
-            blankscreen-macos.zip
-            BlankScreen-*.pkg
-            BlankScreen-*.dmg
+            lidkeep-macos.zip
+            LidKeep-*.pkg
+            LidKeep-*.dmg
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            blankscreen-macos.zip
-            BlankScreen-*.pkg
-            BlankScreen-*.dmg
+            lidkeep-macos.zip
+            LidKeep-*.pkg
+            LidKeep-*.dmg
             SHA256SUMS
           generate_release_notes: true

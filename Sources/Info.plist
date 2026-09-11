@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>          <string>BlankScreenBar</string>
-    <key>CFBundleIdentifier</key>          <string>com.blankscreen.bar</string>
-    <key>CFBundleName</key>                <string>BlankScreenBar</string>
-    <key>CFBundleDisplayName</key>         <string>BlankScreen</string>
+    <key>CFBundleExecutable</key>          <string>LidKeep</string>
+    <key>CFBundleIdentifier</key>          <string>com.lidkeep.bar</string>
+    <key>CFBundleName</key>                <string>LidKeep</string>
+    <key>CFBundleDisplayName</key>         <string>LidKeep</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>1.6.5</string><!--VERSION-->
     <key>CFBundleVersion</key>             <string>1.6.5</string><!--VERSION-->

@@ -1,8 +1,8 @@
-// BlankScreenBar —— blankscreen 的菜单栏控制器 + 可视化设置
+// LidKeep —— lidkeep 的菜单栏控制器 + 可视化设置
 //
 // 与 CLI 的协作方式:
-//   - 共用 ~/Library/Application Support/blankscreen/ 下的 config.json 与状态文件
-//   - 本 App 接管 service.pid，因此 `blankscreen off / on / status`
+//   - 共用 ~/Library/Application Support/LidKeep/ 下的 config.json 与状态文件
+//   - 本 App 接管 service.pid，因此 `lidkeep off / on / status`
 //     会自动识别为常驻服务，通过 SIGUSR1 / SIGUSR2 控制本进程，两边状态永远一致
 //   - 本 App 可直接由 launchd 拉起实现开机自启（不依赖 CLI 的 service install）
 import Foundation
@@ -14,26 +14,26 @@ import Darwin
 // MARK: - 路径（与 CLI 完全一致）
 let fm = FileManager.default
 let home = NSHomeDirectory()
-let base = home + "/Library/Application Support/blankscreen"
+let base = home + "/Library/Application Support/LidKeep"
 let stateFile = base + "/brightness.state"
 let pidFile = base + "/daemon.pid"
 let serviceFile = base + "/service.pid"
 let configFile = base + "/config.json"
-let logPath = base + "/blankscreen.log"
+let logPath = base + "/LidKeep.log"
 let commandFile = base + "/command"        // CLI -> App 的指令(off/on/toggle)，比信号可靠
 
 // 防睡眠 Level 2（覆盖电池与合盖）所需。caffeinate -s 按 man page 明写「仅 AC 有效」，
 // 所以电池与合盖只能靠 pmset disablesleep，而它需要 root。
-let helperPath = "/Library/PrivilegedHelperTools/com.blankscreen.pmset"
-let sudoersPath = "/etc/sudoers.d/blankscreen"
+let helperPath = "/Library/PrivilegedHelperTools/com.lidkeep.pmset"
+let sudoersPath = "/etc/sudoers.d/lidkeep"
 // 关屏被拒绝（电量过低 / 亮度接口不可用）时的回传：CLI off 读完即清
 let rejectFile = base + "/reject"
-let barPlist = home + "/Library/LaunchAgents/com.blankscreen.bar.plist"
+let barPlist = home + "/Library/LaunchAgents/com.lidkeep.bar.plist"
 // 合盖模式托管的 CLI 守护进程的 pid 文件（与 CLI 命名一致）
 let nosleepPidFile = base + "/nosleep.pid"
 /// CLI 二进制路径：合盖模式以独立的 CLI 守护进程持有 disablesleep，
 /// 从而在持有者账本里与黑屏联动（App 自身 pid）互不干扰。
-let cliCandidates = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+let cliCandidates = ["/opt/homebrew/bin/lidkeep", "/usr/local/bin/lidkeep"]
 let cliPath: String = cliCandidates.first(where: { fm.isExecutableFile(atPath: $0) }) ?? cliCandidates[0]
 
 /// 以 launchd 实际注册状态为准：plist 文件存在但没 bootstrap 时，开机并不会启动
@@ -48,7 +48,7 @@ func isLoginItemEnabled() -> Bool {
     t.waitUntilExit()
     return t.terminationStatus == 0
 }
-let barLabel = "com.blankscreen.bar"
+let barLabel = "com.lidkeep.bar"
 
 /// 登录项 plist。KeepAlive 用 SuccessfulExit=false：只有崩溃 / 被强杀才重启，
 /// 正常退出（菜单「退出」、SIGTERM）不再拉起。
@@ -57,8 +57,8 @@ let barLabel = "com.blankscreen.bar"
 func loginItemPlist() -> String {
     let bundle = Bundle.main.bundlePath
     let exe = bundle.hasSuffix(".app")
-        ? bundle + "/Contents/MacOS/BlankScreenBar"
-        : "/Applications/BlankScreenBar.app/Contents/MacOS/BlankScreenBar"
+        ? bundle + "/Contents/MacOS/LidKeep"
+        : "/Applications/LidKeep.app/Contents/MacOS/LidKeep"
     return """
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -72,6 +72,39 @@ func loginItemPlist() -> String {
     </plist>
     """
 }
+// MARK: - v2.0.0 更名迁移（BlankScreen → LidKeep）
+// 与 CLI 侧同源（两边是独立编译单元，故各留一份）。必须在 createDirectory(base)
+// **之前**执行：否则新目录被提前建出来，目录改名会因为「目标已存在」而被跳过，
+// 用户的全部设置静默丢失。
+// 只处理用户级状态；系统级残留（helper / sudoers / LaunchDaemon）需 root，
+// 交给 `lidkeep nosleep uninstall-helper`，doctor 负责报告。
+func migrateLegacyUserState() {
+    let legacyBaseDir = home + "/Library/Application Support/blankscreen"
+    if fm.fileExists(atPath: legacyBaseDir), !fm.fileExists(atPath: base) {
+        try? fm.moveItem(atPath: legacyBaseDir, toPath: base)
+    }
+    // 旧日志文件名（目录整体改名会把它一起带过来）
+    let legacyLog = base + "/blankscreen.log"
+    if fm.fileExists(atPath: legacyLog) {
+        if fm.fileExists(atPath: logPath) { try? fm.removeItem(atPath: legacyLog) }
+        else { try? fm.moveItem(atPath: legacyLog, toPath: logPath) }
+    }
+    for l in ["com.blankscreen.bar", "com.blankscreen.agent"] {
+        let p = home + "/Library/LaunchAgents/\(l).plist"
+        guard fm.fileExists(atPath: p) else { continue }
+        let t = Process()
+        t.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        t.arguments = ["bootout", "gui/\(getuid())/\(l)"]
+        t.standardOutput = FileHandle.nullDevice
+        t.standardError = FileHandle.nullDevice
+        t.standardInput = FileHandle.nullDevice
+        try? t.run()
+        t.waitUntilExit()
+        try? fm.removeItem(atPath: p)
+    }
+}
+
+migrateLegacyUserState()
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
 func blog(_ s: String) {
@@ -380,8 +413,8 @@ struct Battery { var onBattery = false, discharging = false, percent = 100 }
 
 func batteryStatus() -> Battery {
     var b = Battery()
-    // 测试钩子：BS_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"（见 CLI 同名实现）
-    if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_BATTERY"] {
+    // 测试钩子：LK_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"（见 CLI 同名实现）
+    if let sim = ProcessInfo.processInfo.environment["LK_SIMULATE_BATTERY"] {
         let parts = sim.lowercased().split(separator: ",").map(String.init)
         if let p = parts.first, let v = Int(p), (0...100).contains(v) {
             b.percent = v
@@ -411,7 +444,7 @@ func notifyUser(_ msg: String) {
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""]
+    p.arguments = ["-e", "display notification \"\(safe)\" with title \"LidKeep\""]
     try? p.run()
 }
 
@@ -894,7 +927,7 @@ final class ScreenController {
 
     private func killSiblingInstances() {
         let me = ProcessInfo.processInfo.processIdentifier
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: "com.blankscreen.bar")
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: "com.lidkeep.bar")
             .filter { $0.processIdentifier != me }
         for app in others {
             let oldPid = app.processIdentifier
@@ -924,9 +957,9 @@ final class ScreenController {
         let pipe = Pipe(); task.standardOutput = pipe
         try? task.run(); task.waitUntilExit()
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if out.contains("blankscreen") || out.contains("BlankScreenBar") {
-            // 旧实例可能是 CLI daemon，也可能是上一个 BlankScreenBar 实例——都应接管（单实例语义）
-            let which = out.contains("BlankScreenBar") ? L("上一个 BlankScreenBar 实例") : "blankscreen daemon"
+        if out.contains("lidkeep") || out.contains("LidKeep") {
+            // 旧实例可能是 CLI daemon，也可能是上一个 LidKeep 实例——都应接管（单实例语义）
+            let which = out.contains("LidKeep") ? L("上一个 LidKeep 实例") : "lidkeep daemon"
             blog("bar: 接管 service.pid，终止旧 \(which) pid=\(pid)")
             kill(pid, SIGTERM)
             usleep(800_000)
@@ -1014,7 +1047,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private func build() -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 830),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        w.title = L("BlankScreen 设置")
+        w.title = L("LidKeep 设置")
         w.delegate = self
         w.isReleasedWhenClosed = false
         w.center()
@@ -1137,7 +1170,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(btnRow)
 
         // 版本号放在底部：`关于`面板之外，用户反馈问题时能一眼报出版本
-        let ver = NSTextField(labelWithString: "BlankScreen v\(BS_VERSION)  (\(BS_COMMIT))")
+        let ver = NSTextField(labelWithString: "LidKeep v\(LK_VERSION)  (\(LK_COMMIT))")
         ver.font = .systemFont(ofSize: 11)
         ver.textColor = .tertiaryLabelColor
         root.addArrangedSubview(ver)
@@ -1260,10 +1293,10 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
 
     /// 调用 CLI 完成提权安装：密码框由系统弹出，App 不接触凭据
     @objc private func onInstallHelper(_ sender: Any?) {
-        let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+        let cands = ["/opt/homebrew/bin/lidkeep", "/usr/local/bin/lidkeep"]
         guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
             let a = NSAlert(); a.messageText = L("未找到命令行工具")
-            a.informativeText = L("请先在终端安装 blankscreen，或手动执行：\nblankscreen nosleep install-helper")
+            a.informativeText = L("请先在终端安装 lidkeep，或手动执行：\nlidkeep nosleep install-helper")
             a.runModal(); return
         }
         let uninstall = ctl.helperInstalled()
@@ -1355,7 +1388,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     // MARK: 开机自启
     private var appPath: String {
         Bundle.main.bundlePath.hasSuffix(".app") ? Bundle.main.bundlePath
-            : "/Applications/BlankScreenBar.app"
+            : "/Applications/LidKeep.app"
     }
 
     private func setLoginItem(_ on: Bool) {
@@ -1365,7 +1398,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             blog("bar: 已关闭登录自启")
             return
         }
-        let exe = appPath + "/Contents/MacOS/BlankScreenBar"
+        let exe = appPath + "/Contents/MacOS/LidKeep"
         guard fm.fileExists(atPath: exe) else { return }
         let plist = loginItemPlist()
         try? plist.write(toFile: barPlist, atomically: true, encoding: .utf8)
@@ -1418,7 +1451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let b = statusItem.button {
             b.image = icon(blacked: false)
             b.image?.isTemplate = true
-            b.toolTip = L("BlankScreen —— 点击打开菜单")
+            b.toolTip = L("LidKeep —— 点击打开菜单")
         }
         menu = buildMenu()
         menu.delegate = self
@@ -1432,7 +1465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--uitest") {
             openSettings(nil)
             Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { _ in
-                if let w = NSApp.windows.first(where: { $0.title == L("BlankScreen 设置") }) {
+                if let w = NSApp.windows.first(where: { $0.title == L("LidKeep 设置") }) {
                     blog("bar: uitest 窗口 frame=\(w.frame)")
                     Self.dumpView(w.contentView!, depth: 0)
                 } else { blog("bar: uitest 未找到设置窗口") }
@@ -1518,8 +1551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.title = hotkeyUnavailable ? "⚠" : ""
         statusItem.button?.toolTip = hotkeyUnavailable
-            ? (L("BlankScreen —— 快捷键未生效：") + "\(carbonStatusText(ctl.lastHotkeyStatus))")
-            : (L("BlankScreen —— 快捷键 ") + "\(hotkeyText(ctl.cfg))" + L("，点击打开菜单"))
+            ? (L("LidKeep —— 快捷键未生效：") + "\(carbonStatusText(ctl.lastHotkeyStatus))")
+            : (L("LidKeep —— 快捷键 ") + "\(hotkeyText(ctl.cfg))" + L("，点击打开菜单"))
         stateItem.title = blacked ? L("● 屏幕已关闭 · 机器运行中") : L("○ 屏幕正常")
         toggleItem.title = blacked ? (L("恢复显示器  ") + "\(hotkeyText(ctl.cfg))") : (L("关闭显示器  ") + "\(hotkeyText(ctl.cfg))")
         // 运行模式：父项显示当前模式，子项打勾；黑屏中额外标注实际生效层级
@@ -1554,10 +1587,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 一键防睡眠：调 CLI `nosleep setup`（装助手弹系统密码框 + 开联动 + 立即防睡眠）
     @objc private func runSetup(_ sender: Any?) {
-        let cands = ["/opt/homebrew/bin/blankscreen", "/usr/local/bin/blankscreen"]
+        let cands = ["/opt/homebrew/bin/lidkeep", "/usr/local/bin/lidkeep"]
         guard let cli = cands.first(where: { fm.isExecutableFile(atPath: $0) }) else {
             let a = NSAlert(); a.messageText = L("未找到命令行工具")
-            a.informativeText = L("请先安装 blankscreen 命令行工具（.pkg 安装包已包含）。")
+            a.informativeText = L("请先安装 lidkeep 命令行工具（.pkg 安装包已包含）。")
             a.runModal(); return
         }
         setupItem.isEnabled = false
@@ -1673,7 +1706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func toggleLogin(_ sender: Any?) {
         let on = !(loginItem.state == .on)
-        let exe = Bundle.main.bundlePath + "/Contents/MacOS/BlankScreenBar"
+        let exe = Bundle.main.bundlePath + "/Contents/MacOS/LidKeep"
         guard fm.fileExists(atPath: exe) else { return }
         let plist = loginItemPlist()
         if on {
@@ -1739,7 +1772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 // MARK: - 入口
 if CommandLine.arguments.contains("--version") {
-    print("BlankScreenBar \(BS_VERSION) (\(BS_COMMIT))")
+    print("LidKeep \(LK_VERSION) (\(LK_COMMIT))")
     exit(0)
 }
 let app = NSApplication.shared

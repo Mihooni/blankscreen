@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>BlankScreen</title>
+    <title>LidKeep</title>
     <background file="LICENSE.txt" mime-type="text/plain" scaling="none"/>
     <license file="LICENSE.txt" mime-type="text/plain"/>
     <readme file="README-install.html" mime-type="text/html"/>
     <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <choices-outline>
-        <line choice="com.blankscreen"/>
+        <line choice="com.lidkeep"/>
     </choices-outline>
-    <choice id="com.blankscreen" title="BlankScreen" description="关屏但不睡眠">
-        <pkg-ref id="com.blankscreen"/>
+    <choice id="com.lidkeep" title="LidKeep" description="关屏但不睡眠">
+        <pkg-ref id="com.lidkeep"/>
     </choice>
-    <pkg-ref id="com.blankscreen" version="__VERSION__" onConclusion="none">BlankScreen-component.pkg</pkg-ref>
+    <pkg-ref id="com.lidkeep" version="__VERSION__" onConclusion="none">LidKeep-component.pkg</pkg-ref>
 </installer-gui-script>

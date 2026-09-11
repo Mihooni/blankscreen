@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  com.blankscreen.nosleep.reset —— 开机时把 disablesleep 复位为 0。
+  com.lidkeep.nosleep.reset —— 开机时把 disablesleep 复位为 0。
 
   为什么必须有它：
   pmset disablesleep 是**持久**的全局设置，写入后即使进程被 SIGKILL 也仍然生效。
@@ -14,7 +14,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.blankscreen.nosleep.reset</string>
+    <string>com.lidkeep.nosleep.reset</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/pmset</string>

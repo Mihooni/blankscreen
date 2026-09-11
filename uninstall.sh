@@ -1,5 +1,5 @@
 #!/bin/bash
-# blankscreen 完整卸载
+# lidkeep 完整卸载
 cd "$(dirname "$0")"
 
 ZH=0
@@ -14,4 +14,4 @@ make uninstall
 echo
 m "如需同时清除配置与日志（热键设置会丢失）:" \
   "To also remove config and logs (your hotkey settings will be lost):"
-echo "  rm -rf ~/Library/Application\\ Support/blankscreen"
+echo "  rm -rf ~/Library/Application\\ Support/LidKeep"

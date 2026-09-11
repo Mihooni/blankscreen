@@ -7,8 +7,8 @@ xcuserdata/
 # 编译产物
 *.bin
 *.o
-blankscreen
-BlankScreenBar
+lidkeep
+LidKeep
 mkicon
 bright
 dsleep

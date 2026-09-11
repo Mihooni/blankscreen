@@ -4,7 +4,7 @@ import Foundation
 //
 // 界面语言跟随系统：系统语言为中文 → 中文界面，其余（含英文）→ 英文界面。
 // 覆盖顺序（前者优先）：
-//   1. 环境变量 BLANKSCREEN_LANG=zh|en
+//   1. 环境变量 LIDKEEP_LANG=zh|en
 //   2. config.json 里的 lang 字段：auto / zh / en
 //   3. 系统首选语言（AppleLanguages）
 //
@@ -14,7 +14,7 @@ import Foundation
 enum L10n {
     /// 当前语言："zh" 或 "en"。惰性求值一次，之后不再变。
     static let lang: String = {
-        if let v = ProcessInfo.processInfo.environment["BLANKSCREEN_LANG"]?.lowercased(),
+        if let v = ProcessInfo.processInfo.environment["LIDKEEP_LANG"]?.lowercased(),
            !v.isEmpty {
             if v.hasPrefix("zh") { return "zh" }
             if v.hasPrefix("en") { return "en" }
@@ -27,7 +27,7 @@ enum L10n {
 
     /// 读 config.json 的 lang 字段（不依赖 Config 结构，避免初始化循环）
     private static func configuredLang() -> String? {
-        let p = NSHomeDirectory() + "/Library/Application Support/blankscreen/config.json"
+        let p = NSHomeDirectory() + "/Library/Application Support/LidKeep/config.json"
         guard let d = FileManager.default.contents(atPath: p),
               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let s = o["lang"] as? String else { return nil }
@@ -73,12 +73,12 @@ func L(_ zh: String) -> String {
 
 /// 中 → 英 文案表。key 必须是源码里的中文字面量（逐字一致，含空格与标点）。
 let L10nTable: [String: String] = [
-    "      一键安装：`blankscreen nosleep setup`（会弹系统密码框）": "      Install it in one command: `blankscreen nosleep setup` (shows a system password prompt)",
+    "      一键安装：`lidkeep nosleep setup`（会弹系统密码框）": "      Install it in one command: `lidkeep nosleep setup` (shows a system password prompt)",
     "      本次按 Level 1 开启——仅在接电源时有效。": "      Starting at Level 1 — effective on AC power only.",
-    "     → 一键安装：blankscreen nosleep setup": "     → Install it in one command: blankscreen nosleep setup",
-    "     → 启动菜单栏 App，或安装 CLI 常驻服务（blankscreen service install）": "     → Launch the menu bar app, or install the CLI resident service (blankscreen service install)",
-    "     → 执行 `blankscreen on` 恢复，或重启菜单栏 App 自动自愈": "     → Run `blankscreen on` to restore, or restart the menu bar app to self-heal",
-    "     → 重新安装：blankscreen nosleep install-helper --force（需输入一次密码）": "     → Reinstall it: blankscreen nosleep install-helper --force (requires your password once)",
+    "     → 一键安装：lidkeep nosleep setup": "     → Install it in one command: lidkeep nosleep setup",
+    "     → 启动菜单栏 App，或安装 CLI 常驻服务（lidkeep service install）": "     → Launch the menu bar app, or install the CLI resident service (lidkeep service install)",
+    "     → 执行 `lidkeep on` 恢复，或重启菜单栏 App 自动自愈": "     → Run `lidkeep on` to restore, or restart the menu bar app to self-heal",
+    "     → 重新安装：lidkeep nosleep install-helper --force（需输入一次密码）": "     → Reinstall it: lidkeep nosleep install-helper --force (requires your password once)",
     "     防睡眠运行期间合盖会自动熄灭内屏，开盖自动恢复": "     While anti-sleep runs, closing the lid turns the built-in display off and opening it restores brightness",
     "   ⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行": "   ⚠️ Post-install check failed (missing the owner-accounting field) — the install may not have taken effect, please run it again",
     "   启动未确认，请查看 ": "   Startup not confirmed, see ",
@@ -86,7 +86,7 @@ let L10nTable: [String: String] = [
     "   完成（电池与合盖现已可防睡眠）": "   Done (battery and closed lid can now be kept awake)",
     "   已开启 pid=": "   Enabled pid=",
     "   提示：取消密码框会中止安装，可重新运行本命令。": "   Note: cancelling the password prompt aborts installation; just run this command again.",
-    "  /  blankscreen on  /  远程执行同一命令": "  /  blankscreen on  /  run the same command remotely",
+    "  /  lidkeep on  /  远程执行同一命令": "  /  lidkeep on  /  run the same command remotely",
     "  CLI 常驻服务: ": "  CLI resident service: ",
     "  ℹ️ 无本程序守护，但检测到远控软件 ": "  ℹ️ No daemon of ours, but remote-control app ",
     "  ℹ️ 系统级开关由远控软件 ": "  ℹ️ The system-level switch is held by remote-control app ",
@@ -97,7 +97,7 @@ let L10nTable: [String: String] = [
     "  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方": "  ⚠️  Privileged helper is outdated: it lacks multi-owner accounting, so blanking-linked and manual anti-sleep turn each other off",
     "  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕": "  ⚠️  No resident process: the hotkey is unavailable, use CLI commands to toggle the display",
     "  ⚠️ SMC 合盖检测不可用，合盖自动熄屏已禁用（台式机/虚拟机属正常）": "  ⚠️ SMC lid detection unavailable, so automatic lid blackout is disabled (normal on desktops and VMs)",
-    "  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位": "  ⚠️ Leftover detected: no daemon is running but the system-level switch is still on — run `blankscreen nosleep off` to reset",
+    "  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `lidkeep nosleep off` 复位": "  ⚠️ Leftover detected: no daemon is running but the system-level switch is still on — run `lidkeep nosleep off` to reset",
     "  ✅ SMC 合盖检测可用（MSLD），当前：": "  ✅ SMC lid detection available (MSLD), currently: ",
     "  ✅ 一次性黑屏 daemon pid=": "  ✅ One-shot blanking daemon pid=",
     "  ✅ 亮度接口 DisplayServices 可用，当前亮度 ": "  ✅ DisplayServices brightness API available, current brightness ",
@@ -106,13 +106,13 @@ let L10nTable: [String: String] = [
     "  ✅ 无孤儿 caffeinate": "  ✅ No orphaned caffeinate",
     "  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着": "  ❌ brightness.state exists but no process is keeping the display blank — leftover from a crash, the screen may still be black",
     "  ❌ 亮度接口不可用：本 macOS 可能已移除该私有框架，关屏功能整体失效": "  ❌ Brightness API unavailable: this macOS may have removed that private framework, so blanking does not work at all",
-    "  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位": "  ❌ No daemon is running yet system-level anti-sleep is still on — run `blankscreen nosleep off` to reset",
-    "  ❌ 热键未带修饰键：系统不会注册，等于没有热键（blankscreen config --mods cmd,shift --key 0）": "  ❌ Hotkey has no modifier: macOS will not register it, so you effectively have no hotkey (blankscreen config --mods cmd,shift --key 0)",
+    "  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `lidkeep nosleep off` 复位": "  ❌ No daemon is running yet system-level anti-sleep is still on — run `lidkeep nosleep off` to reset",
+    "  ❌ 热键未带修饰键：系统不会注册，等于没有热键（lidkeep config --mods cmd,shift --key 0）": "  ❌ Hotkey has no modifier: macOS will not register it, so you effectively have no hotkey (lidkeep config --mods cmd,shift --key 0)",
     "  一次性模式超时: ": "  One-shot mode timeout: ",
     "  二进制: ": "  Binary: ",
-    "  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep": "  Change: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep",
+    "  修改: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep": "  Change: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep",
     "  关屏联动防睡眠: ": "  Anti-sleep linked to blanking: ",
-    "  关闭: blankscreen nosleep off": "  Turn off: blankscreen nosleep off",
+    "  关闭: lidkeep nosleep off": "  Turn off: lidkeep nosleep off",
     "  内屏: ": "  Built-in display: ",
     "  合盖模式: ": "  Lid mode: ",
     "  守护进程: 运行中 pid=": "  Daemon: running pid=",
@@ -123,7 +123,7 @@ let L10nTable: [String: String] = [
     "  提权助手: ": "  Privileged helper: ",
     "  时长: ": "  Duration: ",
     "  热键 ": "  Hotkey ",
-    "  热键 ⌃⌥⌘B 直接开关；也可用 blankscreen off / on": "  Hotkey ⌃⌥⌘B toggles directly; blankscreen off / on also work",
+    "  热键 ⌃⌥⌘B 直接开关；也可用 lidkeep off / on": "  Hotkey ⌃⌥⌘B toggles directly; lidkeep off / on also work",
     "  热键: ": "  Hotkey: ",
     "  状态目录: ": "  State directory: ",
     "  电源: ": "  Power: ",
@@ -142,7 +142,7 @@ let L10nTable: [String: String] = [
     " 小时 ": " hours ",
     " 小时，0 = 不限）": " hours, 0 = unlimited)",
     " 层级=": " level=",
-    " 已不属于 blankscreen（pid 被复用），清理陈旧记录": " no longer belongs to blankscreen (pid reused), clearing the stale record",
+    " 已不属于 lidkeep（pid 被复用），清理陈旧记录": " no longer belongs to lidkeep (pid reused), clearing the stale record",
     " 当前亮度 ": " current brightness ",
     " 待恢复亮度=": " brightness pending restore=",
     " 投递给了本程序，可直接开关显示。": " to this app — it can toggle the display directly.",
@@ -173,12 +173,12 @@ let L10nTable: [String: String] = [
     "30 分钟": "30 minutes",
     "4 小时": "4 hours",
     "8 小时": "8 hours",
-    "BlankScreen —— 快捷键 ": "BlankScreen — hotkey ",
-    "BlankScreen —— 快捷键未生效：": "BlankScreen — hotkey not working: ",
-    "BlankScreen —— 点击打开菜单": "BlankScreen — click to open the menu",
-    "BlankScreen 一键防睡眠": "BlankScreen one-click anti-sleep",
-    "BlankScreen 设置": "BlankScreen Settings",
-    "BlankScreen 诊断 —— v": "BlankScreen diagnostics — v",
+    "LidKeep —— 快捷键 ": "LidKeep — hotkey ",
+    "LidKeep —— 快捷键未生效：": "LidKeep — hotkey not working: ",
+    "LidKeep —— 点击打开菜单": "LidKeep — click to open the menu",
+    "LidKeep 一键防睡眠": "LidKeep one-click anti-sleep",
+    "LidKeep 设置": "LidKeep Settings",
+    "LidKeep 诊断 —— v": "LidKeep diagnostics — v",
     "DisplayServices 不可用": "DisplayServices unavailable",
     "Return 回车": "Return",
     "Space 空格": "Space",
@@ -199,7 +199,7 @@ let L10nTable: [String: String] = [
     "lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用": "lid: could not read the SMC lid state (normal on desktops and VMs) — lid blackout disabled",
     "lid: 检测到合盖，内屏已熄灭（原亮度 ": "lid: lid closed, built-in display turned off (previous brightness ",
     "lid: 检测到开盖，恢复内屏亮度 ": "lid: lid opened, restoring built-in brightness ",
-    "lid: 测试模式（BS_SIMULATE_LID_CLOSED=": "lid: test mode (BS_SIMULATE_LID_CLOSED=",
+    "lid: 测试模式（LK_SIMULATE_LID_CLOSED=": "lid: test mode (LK_SIMULATE_LID_CLOSED=",
     "lid: SMC 连接已重建（系统睡眠唤醒后连接会失效，已自动恢复）": "lid: SMC connection rebuilt (it lapses after sleep/wake; recovered automatically)",
     "lid: SMC 读取失败且重连未成功，合盖熄屏暂时不可用": "lid: could not read the SMC and reconnecting failed — lid blackout is temporarily unavailable",
     "lid: 系统已唤醒，重新检查合盖状态": "lid: system woke up, re-checking the lid state",
@@ -240,7 +240,7 @@ let L10nTable: [String: String] = [
     "⚠️  亮度接口不可用（DisplayServices 缺失），关屏功能将无法工作": "⚠️  Brightness API unavailable (DisplayServices missing) — blanking will not work",
     "⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行": "⚠️ Post-install check failed (missing the owner-accounting field) — the install may not have taken effect, please run it again",
     "⚠️ 快捷键未生效 —— 点击排查": "⚠️ Hotkey not working — click to diagnose",
-    "✅ 一键配置完成。查看状态: blankscreen nosleep status": "✅ One-click setup complete. Check the status with: blankscreen nosleep status",
+    "✅ 一键配置完成。查看状态: lidkeep nosleep status": "✅ One-click setup complete. Check the status with: lidkeep nosleep status",
     "✅ 已注册": "✅ registered",
     "　兜底 ": "  fallback ",
     "　（设置即时生效）": "  (applies immediately)",
@@ -256,7 +256,7 @@ let L10nTable: [String: String] = [
     "一次性模式黑屏中 pid=": "Blanked in one-shot mode pid=",
     "一键安装并开启": "Install and enable in one click",
     "一键防睡眠": "One-click Anti-sleep",
-    "上一个 BlankScreenBar 实例": "The previous BlankScreenBar instance",
+    "上一个 LidKeep 实例": "The previous LidKeep instance",
     "不启用（一直保持黑屏）": "Disabled (stay blank)",
     "不限": "No limit",
     "不限制": "No limit",
@@ -337,7 +337,7 @@ let L10nTable: [String: String] = [
     "已被系统或其他 App 占用，请换一个组合": "Taken by macOS or another app — pick a different combo",
     "已进入黑屏模式 pid=": "Entered blank mode pid=",
     "已进入黑屏（常驻服务 pid=": "Blanked (resident service pid=",
-    "常驻服务: 未运行（用 `blankscreen service install` 启用）": "Resident service: not running (enable it with `blankscreen service install`)",
+    "常驻服务: 未运行（用 `lidkeep service install` 启用）": "Resident service: not running (enable it with `lidkeep service install`)",
     "常驻服务: 运行中 pid=": "Resident service: running pid=",
     "常驻服务已卸载": "Resident service uninstalled",
     "常驻服务已启动 pid=": "Resident service started pid=",
@@ -356,7 +356,7 @@ let L10nTable: [String: String] = [
     "当前不在黑屏模式": "Not in blank mode",
     "当前亮度 ": "Current brightness ",
     "当前正常显示": "Display is currently on",
-    "当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）": "System-level anti-sleep is currently off (enable it with `blankscreen nosleep on --system`)",
+    "当前系统级防睡眠: 关闭（用 `lidkeep nosleep on --system` 开启）": "System-level anti-sleep is currently off (enable it with `lidkeep nosleep on --system`)",
     "当前黑屏中": "Currently blanked",
     "快捷键未生效": "Hotkey not working",
     "恢复亮度 ": "Restoring brightness ",
@@ -401,7 +401,7 @@ let L10nTable: [String: String] = [
     "未注册（设置里勾选「登录时启动」）": "not registered (tick \"Launch at Login\" in Settings)",
     "未能关屏：": "Could not blank the display: ",
     "未能切换：": "Could not toggle: ",
-    "检测到菜单栏 App（BlankScreenBar）已注册为常驻服务。": "The menu bar app (BlankScreenBar) is already registered as a resident service.",
+    "检测到菜单栏 App（LidKeep）已注册为常驻服务。": "The menu bar app (LidKeep) is already registered as a resident service.",
     "正常显示": "Display on",
     "正常模式（无常驻服务），当前亮度 ": "Normal mode (no resident service), current brightness ",
     "残留黑屏状态": "Leftover blanked state",
@@ -419,7 +419,7 @@ let L10nTable: [String: String] = [
     "热键状态": "Hotkey status",
     "热键自检": "Hotkey Self-test",
     "热键触发": "Hotkey pressed",
-    "用法: blankscreen service install | uninstall | status": "Usage: blankscreen service install | uninstall | status",
+    "用法: lidkeep service install | uninstall | status": "Usage: lidkeep service install | uninstall | status",
     "电池 ": "Battery ",
     "电池供电与合盖仍会睡眠。安装需输入登录密码，只授权一个脚本的四个固定参数。": "on battery or with the lid closed the Mac still sleeps. Installing asks for your login password and grants only one script with four fixed arguments.",
     "电池放电低于 ": "It stops automatically when the battery drops below ",
@@ -431,7 +431,7 @@ let L10nTable: [String: String] = [
     "电量已达下限 ": "Battery reached the floor ",
     "登录时启动": "Launch at Login",
     "登录时自动启动（菜单栏常驻）": "Launch at login (stay in the menu bar)",
-    "示例: blankscreen config --mods cmd,shift --key 0": "Example: blankscreen config --mods cmd,shift --key 0",
+    "示例: lidkeep config --mods cmd,shift --key 0": "Example: lidkeep config --mods cmd,shift --key 0",
     "离开座位前请手动锁屏（⌃⌘Q）。": "Lock the screen manually (⌃⌘Q) before you walk away.",
     "程序退出": "app quit",
     "立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复": "Blanks the screen now while the machine keeps running; click again (or press the hotkey) to restore",
@@ -449,8 +449,8 @@ let L10nTable: [String: String] = [
     "让「息屏时不睡眠」「合盖后不睡眠」覆盖电池与合盖（需 root，弹一次密码框）": "Lets \"Stay awake while blanked\" and \"Stay awake with lid closed\" cover battery and closed lid (needs root; one password prompt)",
     "设置…": "Settings…",
     "设置亮度失败：亮度接口不可用或被系统拒绝（当前 macOS 可能已移除 DisplayServices）\n": "Failed to set brightness: the brightness API is unavailable or was refused (this macOS may have removed DisplayServices)\n",
-    "请先在终端安装 blankscreen，或手动执行：\nblankscreen nosleep install-helper": "Install the blankscreen command-line tool first, or run it manually:\nblankscreen nosleep install-helper",
-    "请先安装 blankscreen 命令行工具（.pkg 安装包已包含）。": "Install the blankscreen command-line tool first (included in the .pkg installer).",
+    "请先在终端安装 lidkeep，或手动执行：\nlidkeep nosleep install-helper": "Install the lidkeep command-line tool first, or run it manually:\nlidkeep nosleep install-helper",
+    "请先安装 lidkeep 命令行工具（.pkg 安装包已包含）。": "Install the lidkeep command-line tool first (included in the .pkg installer).",
     "请卸载后重新安装（需要输入一次登录密码）。": "Uninstall and reinstall it (requires your login password once).",
     "请在「终端」中执行：\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/": "Run this in Terminal:\n\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/",
     "请在终端执行：\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/": "Run this in Terminal:\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/",
@@ -488,10 +488,10 @@ let L10nTable: [String: String] = [
     "（四个固定参数：on / off / status / detect）的授权条目。": " (four fixed arguments: on / off / status / detect).",
     "（放电中）": " (discharging)",
     "（无修饰键）": "(no modifier)",
-    "（用 `blankscreen nosleep off` 关闭）": "(turn it off with `blankscreen nosleep off`)",
+    "（用 `lidkeep nosleep off` 关闭）": "(turn it off with `lidkeep nosleep off`)",
     "（菜单栏 App 可一键开关）": " (toggle it with one click in the menu bar app)",
     "）": ")",
-    "）恢复: 热键或 blankscreen on": ") Restore: hotkey or blankscreen on",
+    "）恢复: 热键或 lidkeep on": ") Restore: hotkey or lidkeep on",
     "，": ", ",
     "，SMC 合盖检测正常": ", SMC lid detection working",
     "，兜底 ": ", fallback ",
@@ -507,7 +507,7 @@ let L10nTable: [String: String] = [
     "：⚠️ ": ": ⚠️ ",
     "：✅ 已注册为系统全局热键。本程序走系统级热键链路，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。": ": ✅ registered as a system-wide hotkey. This app uses the system-level hotkey path, so it needs no Accessibility or Input Monitoring grant and will not stop working when the app is reinstalled.",
     "：已有常驻服务 pid=": ": a resident service is already running with pid=",
-    "：组合已被其他 App 占用（blankscreen config --mods ... --key ... 换一个）": ": the combo is taken by another app (change it with: blankscreen config --mods ... --key ...)",
+    "：组合已被其他 App 占用（lidkeep config --mods ... --key ... 换一个）": ": the combo is taken by another app (change it with: lidkeep config --mods ... --key ...)",
     "；": "; ",
     "错误：--lang 需要 auto（跟随系统）/ zh / en，收到: ": "Error: --lang needs auto (follow the system) / zh / en, got: ",
     "  界面语言: ": "  Interface language: ",
@@ -544,4 +544,9 @@ let L10nTable: [String: String] = [
     "     → 这些与本程序无关；若要让 Mac 恢复自动睡眠，需到对应应用里关闭。": "     -> These are not from this app; turn them off in the owning app to let the Mac sleep again.",
     "  ⚠️  配置要求防睡眠，但当前没有任何断言在生效中（黑屏时才会起断言）": "  [warn] Settings ask to prevent sleep, but no assertion is active right now (it starts when the display is blanked)",
     "防睡眠未生效": "Sleep prevention not in effect",
+    // v2.0.0 更名迁移：旧版 BlankScreen 残留报告
+    "\n【更名残留】": "\n[Legacy leftovers]",
+    "BlankScreen 旧版残留": "BlankScreen legacy leftovers",
+    "  ⚠️  检测到旧版 BlankScreen 的组件仍在（新旧两套防睡眠账本互相不可见）：": "  [warn] Components from the old BlankScreen build are still present (the two anti-sleep ledgers cannot see each other):",
+    "  → 清理：sudo lidkeep nosleep uninstall-helper（会同时复位系统级防睡眠）": "  -> Clean up: sudo lidkeep nosleep uninstall-helper (also resets system-level anti-sleep)",
 ]

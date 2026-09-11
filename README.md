@@ -1,18 +1,20 @@
-# BlankScreen
+<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon">
+
+# LidKeep
 
 **Turn the display off without stopping the Mac.**
 
 The screen goes pitch black; the machine keeps working. Remote desktop stays connected, downloads keep going, builds keep running. Press a hotkey (or run one command over SSH) and the picture comes straight back.
 
-[![Release](https://img.shields.io/github/v/release/Mihooni/blankscreen)](../../releases/latest)
+[![Release](https://img.shields.io/github/v/release/Mihooni/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Chinese: [README.zh-CN.md](README.zh-CN.md)
 
 ```
-$ blankscreen off      # screen goes black, system keeps running
-$ blankscreen on       # display restored (also works over SSH)
+$ lidkeep off      # screen goes black, system keeps running
+$ lidkeep on       # display restored (also works over SSH)
 ```
 
 ## Sound familiar?
@@ -36,9 +38,9 @@ $ blankscreen on       # display restored (also works over SSH)
 | Screensaver / lock screen | ❌ still lit | ✅ | ⚠️ sleeps eventually | — | none |
 | `caffeinate` | ❌ stays lit | ✅ | ✅ | ❌ AC power only | none |
 | Third-party keep-awake apps | ❌ stays lit | ✅ | ✅ | partial | some need grants |
-| **BlankScreen** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
+| **LidKeep** | ✅ | ✅ | ✅ | ✅ | **hotkey needs none** (lid mode needs a one-time helper) |
 
-One row makes all the difference: **BlankScreen kills the backlight, not the display's power.**
+One row makes all the difference: **LidKeep kills the backlight, not the display's power.**
 The display never sleeps, so the framebuffer keeps rendering and a remote viewer always sees the real picture instead of a black box.
 
 ## The fix: three switches, one job each
@@ -61,7 +63,7 @@ The lid mode runs on its own daemon, so it survives an app restart; the two disp
 
 ## Up and running in 30 seconds
 
-1. Download `BlankScreen-<version>.dmg` from [Releases](../../releases/latest)
+1. Download `LidKeep-<version>.dmg` from [Releases](../../releases/latest)
 2. Open it and drag the app into Applications
 3. Click the ☀ icon in the menu bar → **Turn Display Off**
 
@@ -71,7 +73,7 @@ For closed-lid use, tick **Stay Awake with Lid Closed (long-running)** — one a
 ## Three ways people actually use it
 
 **A. The Mac as a remote host** (UURemote / ToDesk / VNC / SSH)
-`blankscreen off` → screen dark, machine awake, remote picture fine. Press the hotkey when you're back at the desk.
+`lidkeep off` → screen dark, machine awake, remote picture fine. Press the hotkey when you're back at the desk.
 Worried you'll forget? A 12-hour fallback timeout restores the display automatically.
 
 **B. Closed in a bag, still working**
@@ -84,7 +86,7 @@ Hit the hotkey; the screen goes dark and your tasks keep running.
 
 ## How it works
 
-Instead of letting macOS put the display to sleep (which kills the framebuffer and breaks screen capture), BlankScreen sets the **system brightness to 0** and holds a `caffeinate -di` assertion so the display pipeline stays fully powered. Verified behavior:
+Instead of letting macOS put the display to sleep (which kills the framebuffer and breaks screen capture), LidKeep sets the **system brightness to 0** and holds a `caffeinate -di` assertion so the display pipeline stays fully powered. Verified behavior:
 
 | Probe | Normal | Blacked out |
 |---|---|---|
@@ -92,14 +94,14 @@ Instead of letting macOS put the display to sleep (which kills the framebuffer a
 | `CGDisplayIsAsleep()` | 0 | **0** — display never sleeps |
 | Display power state | 4 (max) | **4** (max) |
 
-The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but makes remote frames unavailable. BlankScreen keeps the machine fully remote-controllable.
+The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but makes remote frames unavailable. LidKeep keeps the machine fully remote-controllable.
 
 ## Details worth knowing
 
 - **Zero permission grants.** The global hotkey uses the Carbon `RegisterEventHotKey` API, dispatched by WindowServer itself — no Accessibility or Input Monitoring grants, and it keeps working after every rebuild (ad-hoc signed binaries lose TCC grants on each recompile, the most common trap for small tools like this).
 - **Crash-safe.** If the app is killed while the screen is black, the next launch restores your previous brightness automatically. A configurable fallback timeout (default 12 h) is the last safety net.
 - **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power.
-- **CLI and app share state.** `blankscreen on` over SSH can restore a screen the menu bar app turned off, and vice versa.
+- **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
 - **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
 
 ## Language
@@ -110,8 +112,8 @@ To switch it temporarily or permanently:
 
 | Method | Usage |
 |---|---|
-| Environment variable | `BLANKSCREEN_LANG=zh blankscreen doctor` (`zh` / `en`) |
-| Config file | set `"lang": "zh"` in `~/Library/Application Support/blankscreen/config.json` |
+| Environment variable | `LIDKEEP_LANG=zh lidkeep doctor` (`zh` / `en`) |
+| Config file | set `"lang": "zh"` in `~/Library/Application Support/LidKeep/config.json` |
 
 The config accepts `auto` (follow the system, default) / `zh` / `en`; the environment variable wins over it.
 
@@ -122,18 +124,18 @@ The config accepts `auto` (follow the system, default) / `zh` / `en`; the enviro
 
 ## Install
 
-**Option A — installer (recommended).** Download `BlankScreen-<version>.pkg` from
+**Option A — installer (recommended).** Download `LidKeep-<version>.pkg` from
 [Releases](../../releases/latest) and double-click it. One step, both pieces installed:
 
 | Installed to | Item |
 |---|---|
-| `/Applications/BlankScreenBar.app` | menu bar app |
-| `/usr/local/bin/blankscreen` | CLI |
+| `/Applications/LidKeep.app` | menu bar app |
+| `/usr/local/bin/lidkeep` | CLI |
 
 The installer also clears the Gatekeeper quarantine flag and launches the app for you,
 so there is nothing to do by hand.
 
-**Option A2 — DMG drag-and-drop.** Download `BlankScreen-<version>.dmg` from
+**Option A2 — DMG drag-and-drop.** Download `LidKeep-<version>.dmg` from
 [Releases](../../releases/latest), open it, and drag the app into Applications.
 Double-click `Install Command-Line Tool.command` inside the image to also install the CLI
 (one GUI password prompt). If Gatekeeper blocks the first launch, right-click
@@ -142,8 +144,8 @@ the app → **Open**.
 **Option B — build from source** (needs Xcode Command Line Tools):
 
 ```bash
-git clone https://github.com/Mihooni/blankscreen.git
-cd blankscreen
+git clone https://github.com/Mihooni/lidkeep.git
+cd lidkeep
 ./install.sh              # installs CLI to your Homebrew prefix (/opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel) + app to /Applications
 ```
 
@@ -152,9 +154,9 @@ cd blankscreen
 **Option C — download a prebuilt zip** from [Releases](../../releases/latest), then:
 
 ```bash
-xattr -dr com.apple.quarantine BlankScreenBar.app   # unsigned build: clear Gatekeeper flag
-cp -R BlankScreenBar.app /Applications/
-# Apple Silicon: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
+xattr -dr com.apple.quarantine LidKeep.app   # unsigned build: clear Gatekeeper flag
+cp -R LidKeep.app /Applications/
+# Apple Silicon: sudo cp lidkeep /opt/homebrew/bin/   |   Intel: sudo cp lidkeep /usr/local/bin/
 ```
 
 > **Not signed with a paid developer certificate.** macOS may refuse to open the
@@ -162,6 +164,30 @@ cp -R BlankScreenBar.app /Applications/
 > `.pkg` → **Open**, then confirm. Same for the app on first launch — though the
 > installer already clears its quarantine flag, so the app should open normally
 > right after installing.
+
+### Upgrading from BlankScreen (v1.x)
+
+Before v1.6.5 this product was called **BlankScreen**. v2.0.0 renames everything: the CLI
+(`blankscreen` → `lidkeep`), the app (`BlankScreenBar.app` → `LidKeep.app`) and every bundle
+identifier.
+
+**Your settings migrate automatically.** The first time the new app or CLI runs, the config
+folder is renamed in place and the old login item is unregistered — hotkey, timeout, battery
+floor and power mode are all preserved.
+
+Three things are **not** automatic, because they live outside your home folder or need root:
+
+```bash
+sudo lidkeep nosleep uninstall-helper   # removes the old privileged helper, sudoers rule and
+                                        # LaunchDaemon, and resets system-level anti-sleep
+rm -rf /Applications/BlankScreenBar.app # removes the old app bundle
+```
+
+The first command matters more than it looks: the old helper owns its own
+`/var/db/blankscreen-nosleep` ledger, which the new build cannot see. Leaving it behind can pin
+your Mac in "never sleep" with no visible owner. `lidkeep doctor` reports any leftovers it finds.
+
+If you still want closed-lid mode afterwards, install the helper again from the new app's settings.
 
 ### Verify a download (optional)
 
@@ -171,7 +197,7 @@ workflow — no Apple account needed:
 
 ```bash
 shasum -a 256 -c SHA256SUMS                                          # bytes match what was published
-gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by this repo's release workflow
+gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # built by this repo's release workflow
 ```
 
 ## Usage
@@ -188,37 +214,37 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by 
 **CLI**:
 
 ```bash
-blankscreen off                    # black out now (one-shot daemon, auto-restores after timeout)
-blankscreen off --timeout 3600     # custom fallback timeout
-blankscreen on                     # restore the display
-blankscreen toggle                 # one-command switch — handy for hotkey tools and remote scripts
-blankscreen status                 # state, including power source and battery level
-blankscreen doctor                 # full self-check: display control, processes, leftovers
-blankscreen version                # print version (include it when reporting issues)
-blankscreen bright 0.5             # read/write system brightness directly
-blankscreen service install        # run the CLI as a launchd service (menu app not required)
-blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
-blankscreen config --battery 20    # battery floor %: refuse/exit blackout below it (0 = off)
-blankscreen config --auto-nosleep  # link anti-sleep to blackout; auto-reset on restore
+lidkeep off                    # black out now (one-shot daemon, auto-restores after timeout)
+lidkeep off --timeout 3600     # custom fallback timeout
+lidkeep on                     # restore the display
+lidkeep toggle                 # one-command switch — handy for hotkey tools and remote scripts
+lidkeep status                 # state, including power source and battery level
+lidkeep doctor                 # full self-check: display control, processes, leftovers
+lidkeep version                # print version (include it when reporting issues)
+lidkeep bright 0.5             # read/write system brightness directly
+lidkeep service install        # run the CLI as a launchd service (menu app not required)
+lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200
+lidkeep config --battery 20    # battery floor %: refuse/exit blackout below it (0 = off)
+lidkeep config --auto-nosleep  # link anti-sleep to blackout; auto-reset on restore
 ```
 
-Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `blankscreen config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
+Default hotkey: **⌃⌥⌘B**. Change it in the settings panel or via `lidkeep config`. The combo must include at least one modifier (⌘/⌃/⌥/⇧) — macOS rejects global hotkeys without one.
 
 **Multiple displays:** blackout applies to every online display. However, most HDMI/DVI/DP
 external monitors don't support software brightness, so those panels can't be dimmed —
-`blankscreen doctor` tells you exactly which one, instead of leaving you guessing.
+`lidkeep doctor` tells you exactly which one, instead of leaving you guessing.
 
 ## Anti-sleep (closed lid / battery / headless)
 
 Blackout only kills the backlight — the system itself still sleeps on schedule. If the machine must keep working while blacked out (remote access, downloads, closed-clamshell use), enable anti-sleep:
 
 ```bash
-blankscreen nosleep setup                  # one command: install helper + blackout linkage + start anti-sleep
-blankscreen nosleep on                     # process-level (caffeinate; effective on AC power only)
-blankscreen nosleep on --system            # system-level (covers battery + lid; requires the helper)
-blankscreen nosleep on --timeout 3600      # auto-stop after a duration
-blankscreen nosleep status                 # level / power source / uptime
-blankscreen nosleep off                    # stop and reset
+lidkeep nosleep setup                  # one command: install helper + blackout linkage + start anti-sleep
+lidkeep nosleep on                     # process-level (caffeinate; effective on AC power only)
+lidkeep nosleep on --system            # system-level (covers battery + lid; requires the helper)
+lidkeep nosleep on --timeout 3600      # auto-stop after a duration
+lidkeep nosleep status                 # level / power source / uptime
+lidkeep nosleep off                    # stop and reset
 ```
 
 ### Lid-closed anti-sleep (long-running mode)
@@ -235,17 +261,17 @@ In the menu bar app, click **"Stay Awake with Lid Closed (long-running)"** to en
 You can also tick "Stay awake with lid closed (long-running mode)" in the settings panel, or use the CLI:
 
 ```bash
-blankscreen nosleep on --system            # enable directly (helper required)
-blankscreen nosleep status                 # shows the lid-mode state
-blankscreen nosleep off                    # stop and reset
+lidkeep nosleep on --system            # enable directly (helper required)
+lidkeep nosleep status                 # shows the lid-mode state
+lidkeep nosleep off                    # stop and reset
 ```
 
 **Why does the system level need a privileged helper?** Per `man caffeinate`, the `-s` assertion is effective **on AC power only**. Covering battery and closed-lid requires `pmset disablesleep`, which must run as root. Install the helper once (asks for your admin password):
 
 ```bash
-sudo blankscreen nosleep install-helper    # least privilege: sudoers limited to this tool, 4 whitelisted args
-blankscreen nosleep detect                 # check disablesleep support on this system
-sudo blankscreen nosleep uninstall-helper  # uninstall (resets disablesleep before removal)
+sudo lidkeep nosleep install-helper    # least privilege: sudoers limited to this tool, 4 whitelisted args
+lidkeep nosleep detect                 # check disablesleep support on this system
+sudo lidkeep nosleep uninstall-helper  # uninstall (resets disablesleep before removal)
 ```
 
 Safety design:
@@ -257,7 +283,7 @@ Safety design:
 - **Owner accounting:** `disablesleep` is a single global switch that "blackout-linked anti-sleep"
   and "manual anti-sleep" may both depend on. The helper records each owner, so when one stops it
   only unregisters itself — it never disables the anti-sleep the other one still relies on.
-  (Ledger lives in `/var/db/blankscreen-nosleep`, owned by root; unprivileged users can't forge owners.)
+  (Ledger lives in `/var/db/lidkeep-nosleep`, owned by root; unprivileged users can't forge owners.)
 - **Coexists with remote-control apps:** ToDesk / Sunlogin / UURemote / TeamViewer and friends hold the same switch to stay reachable. When one is running, `doctor` reports "held by a remote-control app" instead of flagging it as a leftover to fix.
 - The battery floor applies to anti-sleep too — closed lid + battery + no sleep is the fastest way to drain a battery
 
@@ -265,7 +291,7 @@ Safety design:
 
 ```bash
 ./uninstall.sh           # or: make uninstall
-# config/logs (optional): rm -rf ~/Library/Application\ Support/blankscreen
+# config/logs (optional): rm -rf ~/Library/Application\ Support/LidKeep
 ```
 
 ## FAQ
@@ -278,7 +304,7 @@ Safety design:
 
 **Power savings?** Backlight off saves roughly 1–2 W (up to ~15–30% of a lightly loaded machine). The GPU/compositor keep running by design.
 
-**How does the battery guard work?** It only acts when the Mac is on battery and discharging: below the floor (default 20%), starting a blackout is refused; during a blackout the battery is re-checked every 30 s and the display is restored automatically with a notification once the floor is crossed. On AC power it never interferes. Set `blankscreen config --battery 0` (or the settings panel) to disable.
+**How does the battery guard work?** It only acts when the Mac is on battery and discharging: below the floor (default 20%), starting a blackout is refused; during a blackout the battery is re-checked every 30 s and the display is restored automatically with a notification once the floor is crossed. On AC power it never interferes. Set `lidkeep config --battery 0` (or the settings panel) to disable.
 
 ## Development
 
@@ -303,7 +329,7 @@ the menu bar app is live, since that would interrupt your session). Set `SMOKE_F
 
 - **Some external displays can't be turned off.** Dimming relies on the software brightness API,
   which most HDMI/DVI/DP monitors don't support, so those panels stay lit during a blackout.
-  `blankscreen doctor` names the exact display. Powering them down would require true display
+  `lidkeep doctor` names the exact display. Powering them down would require true display
   sleep, which breaks remote frames — this tool deliberately doesn't do that.
 
 - The panel is **not powered down** — this is intentional. Backlight is driven to 0, so

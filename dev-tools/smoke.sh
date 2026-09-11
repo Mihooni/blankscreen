@@ -1,12 +1,12 @@
 #!/bin/bash
-# blankscreen 端到端冒烟测试
+# lidkeep 端到端冒烟测试
 #
 # 目的：把「改了代码还能不能用」从人工验证变成一条命令。
 # 覆盖：版本/诊断输出、参数校验、配置往返、电量保护、关屏与恢复、孤儿进程、
 #       防睡眠启停、合盖熄屏与恢复（模拟）、提权助手资产一致性。
 #
 # 用法:
-#   ./dev-tools/smoke.sh [CLI 路径]        # 默认 build/blankscreen
+#   ./dev-tools/smoke.sh [CLI 路径]        # 默认 build/lidkeep
 #   SMOKE_FULL=1 ./dev-tools/smoke.sh      # 强制跑真实关屏测试
 #
 # 设计取舍：
@@ -18,10 +18,10 @@ set -uo pipefail
 
 # 断言基于中文案文，而 CLI 会跟随系统语言（CI 是英文系统）→ 这里锁定为中文。
 # 需要测英文时: SMOKE_LANG=en ./dev-tools/smoke.sh
-export BLANKSCREEN_LANG="${SMOKE_LANG:-zh}"
+export LIDKEEP_LANG="${SMOKE_LANG:-zh}"
 
-B="${1:-build/blankscreen}"
-CFG="$HOME/Library/Application Support/blankscreen/config.json"
+B="${1:-build/lidkeep}"
+CFG="$HOME/Library/Application Support/LidKeep/config.json"
 pass=0; fail=0; skip=0
 
 ok()   { echo "  ✅ $1"; pass=$((pass + 1)); }
@@ -33,7 +33,7 @@ if [ ! -x "$B" ]; then
     exit 2
 fi
 
-echo "blankscreen 冒烟测试 —— $($B version 2>/dev/null | head -1)"
+echo "lidkeep 冒烟测试 —— $($B version 2>/dev/null | head -1)"
 echo
 
 # ---------- 1. 版本与诊断 ----------
@@ -87,7 +87,7 @@ if [ "$has_service" -eq 1 ]; then
 elif [ "$no_display" -eq 1 ]; then
     skip_ "低电量拒绝关屏" "无可用亮度接口"
 else
-    BS_SIMULATE_BATTERY="10,batt,discharging" "$B" off >/dev/null 2>&1
+    LK_SIMULATE_BATTERY="10,batt,discharging" "$B" off >/dev/null 2>&1
     [ $? -ne 0 ] && ok "低电量时拒绝关屏并报错" || bad "低电量未拒绝关屏"
 fi
 
@@ -143,8 +143,8 @@ fi
 
 # ---------- 8. 合盖熄屏与恢复（模拟合盖，不依赖物理开合盖子） ----------
 echo
-echo "【8】合盖熄屏与恢复（BS_SIMULATE_LID_CLOSED 模拟）"
-log_file="$HOME/Library/Application Support/blankscreen/blankscreen.log"
+echo "【8】合盖熄屏与恢复（LK_SIMULATE_LID_CLOSED 模拟）"
+log_file="$HOME/Library/Application Support/LidKeep/LidKeep.log"
 log_tail() {  # 打印自调用前累积行数之后的新日志
     local n0="$1"
     tail -n "+$((n0 + 1))" "$log_file" 2>/dev/null
@@ -162,7 +162,7 @@ else
     "$B" nosleep off >/dev/null 2>&1
     n0=$(wc -l < "$log_file" 2>/dev/null || echo 0)
     # --timeout 8 兜底：即使断言失败守护也会自停，不留黑屏
-    BS_SIMULATE_LID_CLOSED=1 "$B" nosleep on --timeout 8 >/dev/null 2>&1
+    LK_SIMULATE_LID_CLOSED=1 "$B" nosleep on --timeout 8 >/dev/null 2>&1
     sleep 3
     if log_tail "$n0" | grep -q "内屏已熄灭"; then
         ok "合盖后内屏自动熄灭"
@@ -189,19 +189,19 @@ echo
 echo "【9】提权助手资产一致性（内嵌资产必须与仓库副本逐字相同）"
 tmp_assets=$(mktemp -d)
 "$B" nosleep write-assets "$tmp_assets" >/dev/null 2>&1
-if diff -q "$tmp_assets/com.blankscreen.pmset" packaging/helper/com.blankscreen.pmset >/dev/null 2>&1; then
+if diff -q "$tmp_assets/com.lidkeep.pmset" packaging/helper/com.lidkeep.pmset >/dev/null 2>&1; then
     ok "helper 脚本与仓库副本一致"
 else
     bad "helper 脚本与仓库副本不一致（执行 make 后重新 write-assets 同步）"
 fi
-if diff -q "$tmp_assets/com.blankscreen.nosleep.reset.plist" \
-            packaging/helper/com.blankscreen.nosleep.reset.plist >/dev/null 2>&1; then
+if diff -q "$tmp_assets/com.lidkeep.nosleep.reset.plist" \
+            packaging/helper/com.lidkeep.nosleep.reset.plist >/dev/null 2>&1; then
     ok "开机复位 LaunchDaemon 与仓库副本一致"
 else
     bad "LaunchDaemon 与仓库副本不一致"
 fi
 # 提权脚本必须能被 shell 解析：它会被 root 执行，语法错误意味着安装即损坏
-if sh -n packaging/helper/com.blankscreen.pmset 2>/dev/null; then
+if sh -n packaging/helper/com.lidkeep.pmset 2>/dev/null; then
     ok "helper 脚本语法正确"
 else
     bad "helper 脚本存在语法错误"
@@ -210,48 +210,48 @@ rm -rf "$tmp_assets"
 
 # ---------- 10. 本地化 ----------
 echo
-echo "【10】本地化（界面语言跟随系统，可用 BLANKSCREEN_LANG 覆盖）"
+echo "【10】本地化（界面语言跟随系统，可用 LIDKEEP_LANG 覆盖）"
 # 汉字检测必须用 Perl 的 \p{Han}：grep 的字符区间 [一-鿿] 在 CI 的 C locale 下
 # 会把 emoji 和 ⌃⌥⌘ 之类的符号也算成中文（实测误判 ✅ / ⚠️ / —）。
 has_han() { perl -CSD -ne 'BEGIN { $f = 0 } $f++ if /\p{Han}/; END { exit($f ? 0 : 1) }'; }
 lines_han() { perl -CSD -ne 'print "$.: $_" if /\p{Han}/'; }
 
-en_out=$(BLANKSCREEN_LANG=en "$B" doctor 2>/dev/null)
+en_out=$(LIDKEEP_LANG=en "$B" doctor 2>/dev/null)
 if printf '%s\n' "$en_out" | has_han; then
     bad "英文模式下仍有中文残留"
     printf '%s\n' "$en_out" | lines_han | head -5 | sed 's/^/      残留: /'
 else
     ok "英文模式输出无中文残留"
 fi
-zh_out=$(BLANKSCREEN_LANG=zh "$B" doctor 2>/dev/null)
+zh_out=$(LIDKEEP_LANG=zh "$B" doctor 2>/dev/null)
 if printf '%s\n' "$zh_out" | has_han; then
     ok "中文模式输出为中文"
 else
     bad "中文模式未输出中文"
 fi
-if BLANKSCREEN_LANG=en "$B" --help 2>/dev/null | grep -q 'CLI usage'; then
+if LIDKEEP_LANG=en "$B" --help 2>/dev/null | grep -q 'CLI usage'; then
     ok "帮助文本已本地化"
 else
     bad "帮助文本未本地化"
 fi
-# 跟随系统语言：用 -AppleLanguages 参数域模拟系统语言。必须清掉 BLANKSCREEN_LANG
+# 跟随系统语言：用 -AppleLanguages 参数域模拟系统语言。必须清掉 LIDKEEP_LANG
 # 才会走到系统判定这一步（smoke.sh 顶部把它锁成了中文）。
 # 回归点：系统语言既非中文也非英文（如日语）时应回落英文界面——曾经因为退回
 # Locale.current（本机区域 zh）而误判成中文。
-sys_ja=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(ja)' 2>/dev/null)
+sys_ja=$(env -u LIDKEEP_LANG "$B" -AppleLanguages '(ja)' 2>/dev/null)
 if printf '%s\n' "$sys_ja" | has_han; then
     bad "非中英系统语言未回落英文界面（误判为中文）"
     printf '%s\n' "$sys_ja" | lines_han | head -3 | sed 's/^/      残留: /'
 else
     ok "非中英系统语言（ja）回落英文界面"
 fi
-sys_en=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(en)' 2>/dev/null)
+sys_en=$(env -u LIDKEEP_LANG "$B" -AppleLanguages '(en)' 2>/dev/null)
 if printf '%s\n' "$sys_en" | has_han; then
     bad "模拟英文系统时仍有中文"
 else
     ok "跟随系统语言（en）生效"
 fi
-sys_zh=$(env -u BLANKSCREEN_LANG "$B" -AppleLanguages '(zh-Hans)' 2>/dev/null)
+sys_zh=$(env -u LIDKEEP_LANG "$B" -AppleLanguages '(zh-Hans)' 2>/dev/null)
 if printf '%s\n' "$sys_zh" | has_han; then
     ok "跟随系统语言（zh-Hans）生效"
 else

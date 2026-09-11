@@ -1,18 +1,20 @@
-# BlankScreen
+<img src="docs/icon.png" width="112" align="right" alt="LidKeep app icon">
+
+# LidKeep
 
 **让 Mac 熄屏，但别停下。**
 
 屏幕全黑，机器照常运行：远程桌面还在、下载还在、构建还在。按一下热键（或 SSH 里一条命令）立刻恢复画面。
 
-[![Release](https://img.shields.io/github/v/release/Mihooni/blankscreen)](../../releases/latest)
+[![Release](https://img.shields.io/github/v/release/Mihooni/lidkeep)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#环境要求)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 English: [README.md](README.md)
 
 ```
-$ blankscreen off      # 屏幕熄灭，系统继续跑
-$ blankscreen on       # 恢复显示（SSH 里执行同样有效）
+$ lidkeep off      # 屏幕熄灭，系统继续跑
+$ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 ```
 
 ## 你是不是也遇到过这些
@@ -36,9 +38,9 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 | 屏保 / 锁屏 | ❌ 还亮 | ✅ | ⚠️ 到点会睡 | — | 无 |
 | `caffeinate` | ❌ 一直亮 | ✅ | ✅ | ❌ 仅插电有效 | 无 |
 | 第三方防睡眠 App | ❌ 一直亮 | ✅ | ✅ | 部分支持 | 部分要授权 |
-| **BlankScreen** | ✅ | ✅ | ✅ | ✅ | **热键零授权**（合盖需装一次助手） |
+| **LidKeep** | ✅ | ✅ | ✅ | ✅ | **热键零授权**（合盖需装一次助手） |
 
-差别只有一行，但决定了能不能用：**BlankScreen 灭的是背光，不是显示器电源**。
+差别只有一行，但决定了能不能用：**LidKeep 灭的是背光，不是显示器电源**。
 显示器从未睡眠，帧缓冲一直在渲染，所以远程端抓到的永远是真实画面，而不是一片黑。
 
 ## 解决方案：三个开关，各管一件事
@@ -61,7 +63,7 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 
 ## 30 秒上手
 
-1. 从 [Releases](../../releases/latest) 下载 `BlankScreen-<版本>.dmg`
+1. 从 [Releases](../../releases/latest) 下载 `LidKeep-<版本>.dmg`
 2. 打开，把 App 拖进 Applications
 3. 点菜单栏的 ☀ 图标 → **关闭显示器**
 
@@ -71,7 +73,7 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 ## 三种典型用法
 
 **A. 把 Mac 当远程主机**（UURemote / ToDesk / VNC / SSH）
-`blankscreen off` 熄屏 → 机器不睡 → 远程画面正常。回到机器前按热键恢复。
+`lidkeep off` 熄屏 → 机器不睡 → 远程画面正常。回到机器前按热键恢复。
 怕忘？默认 12 小时兜底自动恢复。
 
 **B. 合盖收纳，任务不断**
@@ -93,14 +95,14 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 | `CGDisplayIsAsleep()` | 0 | **0**（显示器从未睡眠） |
 | 显示控制器电源状态 | 4（满功率） | **4**（满功率） |
 
-代价是刻意选择的：真·显示器睡眠能多省约 0.5–1.5 W，但远程画面就没了。BlankScreen 保证机器始终可被远程操控。
+代价是刻意选择的：真·显示器睡眠能多省约 0.5–1.5 W，但远程画面就没了。LidKeep 保证机器始终可被远程操控。
 
 ## 还有这些细节
 
 - **零授权热键**。全局热键走 Carbon `RegisterEventHotKey`，由 WindowServer 直接派发 —— 不需要「辅助功能」「输入监控」任何授权，反复重编译、重装也不会失效（ad-hoc 签名二进制每次重编译都会丢 TCC 授权，这是同类小工具最常见的坑）。
 - **崩溃安全**。黑屏期间进程被意外杀死，下次启动自动恢复原亮度；另有可配置的兜底超时（默认 12 小时）作为最后安全网。
 - **电量保护**。仅电池且放电时生效：低于下限（默认 20%）拒绝关屏，黑屏期间每 30 秒复查，跌破立即恢复并通知。插电不干预。
-- **CLI 与 App 状态互通**。SSH 里 `blankscreen on` 能唤醒菜单栏 App 关掉的屏幕，反之亦然。
+- **CLI 与 App 状态互通**。SSH 里 `lidkeep on` 能唤醒菜单栏 App 关掉的屏幕，反之亦然。
 - **单实例**。重复启动会干净接管，并清理遗留的 `caffeinate` 孤儿进程。
 
 ## 界面语言
@@ -111,8 +113,8 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 
 | 方式 | 用法 |
 |---|---|
-| 环境变量 | `BLANKSCREEN_LANG=en blankscreen doctor`（`zh` / `en`） |
-| 配置文件 | `~/Library/Application Support/blankscreen/config.json` 里设 `"lang": "en"` |
+| 环境变量 | `LIDKEEP_LANG=en lidkeep doctor`（`zh` / `en`） |
+| 配置文件 | `~/Library/Application Support/LidKeep/config.json` 里设 `"lang": "en"` |
 
 配置文件可选 `auto`（跟随系统，默认）/ `zh` / `en`；环境变量优先级最高。
 
@@ -126,25 +128,25 @@ $ blankscreen on       # 恢复显示（SSH 里执行同样有效）
 ## 安装
 
 **方式 A —— 安装包（推荐）**：从 [Releases](../../releases/latest) 下载
-`BlankScreen-<版本号>.pkg`，双击即可，一步装好两项：
+`LidKeep-<版本号>.pkg`，双击即可，一步装好两项：
 
 | 安装位置 | 内容 |
 |---|---|
-| `/Applications/BlankScreenBar.app` | 菜单栏 App |
-| `/usr/local/bin/blankscreen` | 命令行工具 |
+| `/Applications/LidKeep.app` | 菜单栏 App |
+| `/usr/local/bin/lidkeep` | 命令行工具 |
 
 安装器会自动清除 Gatekeeper 隔离标记并启动 App，无需任何手工操作。
 
 **方式 A2 —— DMG 拖拽安装**：从 [Releases](../../releases/latest) 下载
-`BlankScreen-<版本号>.dmg`，打开后把 App 拖进 Applications 文件夹；
+`LidKeep-<版本号>.dmg`，打开后把 App 拖进 Applications 文件夹；
 双击镜像里的「Install Command-Line Tool.command」可顺手装好 CLI（弹一次系统密码框）。
 若 App 首次打开被 Gatekeeper 拦下，右键 → **打开** 即可。
 
 **方式 B —— 源码构建**（需 Xcode Command Line Tools）：
 
 ```bash
-git clone https://github.com/Mihooni/blankscreen.git
-cd blankscreen
+git clone https://github.com/Mihooni/lidkeep.git
+cd lidkeep
 ./install.sh              # CLI 装到 Homebrew 前缀（Apple 芯片 /opt/homebrew/bin，Intel /usr/local/bin），App 装到 /Applications
 ```
 
@@ -153,14 +155,36 @@ cd blankscreen
 **方式 C —— 下载预编译包**：从 [Releases](../../releases/latest) 下载 zip，然后：
 
 ```bash
-xattr -dr com.apple.quarantine BlankScreenBar.app   # 清除 Gatekeeper 隔离标记
-cp -R BlankScreenBar.app /Applications/
-# Apple 芯片: sudo cp blankscreen /opt/homebrew/bin/   |   Intel: sudo cp blankscreen /usr/local/bin/
+xattr -dr com.apple.quarantine LidKeep.app   # 清除 Gatekeeper 隔离标记
+cp -R LidKeep.app /Applications/
+# Apple 芯片: sudo cp lidkeep /opt/homebrew/bin/   |   Intel: sudo cp lidkeep /usr/local/bin/
 ```
 
 > **未使用付费开发者证书签名。** macOS 可能拒绝打开下载来的 `.pkg`（提示"身份不明的开发者"）。
 > 此时对 `.pkg` 右键 → **打开**，再确认即可。App 首次启动同理 —— 不过安装器已自动清除了
 > App 的隔离标记，装完直接就能正常打开。
+
+### 从 BlankScreen 升级（v1.x）
+
+v1.6.5 之前这个产品叫 **BlankScreen**。v2.0.0 统一更名：CLI（`blankscreen` → `lidkeep`）、
+App（`BlankScreenBar.app` → `LidKeep.app`）以及全部 bundle identifier 都已改变。
+
+**设置会自动迁移。** 新版 App 或 CLI 第一次运行时，配置目录原样改名、旧登录项自动注销，
+热键、超时、电量下限与运行模式全部保留。
+
+有三样东西**不会**自动处理，因为它们在你主目录之外，或者需要 root：
+
+```bash
+sudo lidkeep nosleep uninstall-helper   # 清掉旧的提权助手、sudoers 规则与 LaunchDaemon，
+                                        # 并把系统级防睡眠复位
+rm -rf /Applications/BlankScreenBar.app # 删除旧版 App
+```
+
+第一条命令比看上去更重要：旧助手拥有自己的 `/var/db/blankscreen-nosleep` 持有者账本，
+新版本看不到它。留着它可能让 Mac 卡在「永不睡眠」，却看不出是谁开的。
+`lidkeep doctor` 会报告它发现的任何旧版残留。
+
+清理之后若仍需要合盖模式，在新版 App 的设置里重新装一次助手即可。
 
 ### 验证下载（可选）
 
@@ -169,7 +193,7 @@ cp -R BlankScreenBar.app /Applications/
 
 ```bash
 shasum -a 256 -c SHA256SUMS                                          # 校验文件完整性
-gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # 验证构建来源
+gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # 验证构建来源
 ```
 
 ## 使用
@@ -186,35 +210,35 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # 验证构
 **CLI**：
 
 ```bash
-blankscreen off                    # 立即黑屏（一次性 daemon，超时自动恢复）
-blankscreen off --timeout 3600     # 自定义兜底超时
-blankscreen on                     # 恢复显示
-blankscreen toggle                 # 一条命令切换（可绑定到快捷键工具 / 远程脚本）
-blankscreen status                 # 查看状态（含电源与电量）
-blankscreen doctor                 # 综合自检：关屏能力、显示器可控性、进程、残留
-blankscreen version                # 查看版本（反馈问题时一并附上）
-blankscreen bright 0.5             # 直接读写系统亮度
-blankscreen service install        # 以 launchd 服务常驻（不用菜单栏 App 时）
-blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200
-blankscreen config --battery 20    # 电量下限 %：低于则拒绝/退出黑屏（0 = 不限制）
-blankscreen config --auto-nosleep  # 关屏时自动联动防睡眠，恢复显示时自动复位
+lidkeep off                    # 立即黑屏（一次性 daemon，超时自动恢复）
+lidkeep off --timeout 3600     # 自定义兜底超时
+lidkeep on                     # 恢复显示
+lidkeep toggle                 # 一条命令切换（可绑定到快捷键工具 / 远程脚本）
+lidkeep status                 # 查看状态（含电源与电量）
+lidkeep doctor                 # 综合自检：关屏能力、显示器可控性、进程、残留
+lidkeep version                # 查看版本（反馈问题时一并附上）
+lidkeep bright 0.5             # 直接读写系统亮度
+lidkeep service install        # 以 launchd 服务常驻（不用菜单栏 App 时）
+lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200
+lidkeep config --battery 20    # 电量下限 %：低于则拒绝/退出黑屏（0 = 不限制）
+lidkeep config --auto-nosleep  # 关屏时自动联动防睡眠，恢复显示时自动复位
 ```
 
-默认热键 **⌃⌥⌘B**。可在设置面板或 `blankscreen config` 修改。组合必须带至少一个修饰键（⌘/⌃/⌥/⇧）—— macOS 不允许无修饰键的全局热键。
+默认热键 **⌃⌥⌘B**。可在设置面板或 `lidkeep config` 修改。组合必须带至少一个修饰键（⌘/⌃/⌥/⇧）—— macOS 不允许无修饰键的全局热键。
 
-**多显示器**：关屏会对所有在线显示器生效。但多数 HDMI / DVI / DP 外接屏不支持软件亮度控制，这类屏幕关不掉 —— `blankscreen doctor` 会明确列出哪块屏不可控，不会让你以为它坏了。
+**多显示器**：关屏会对所有在线显示器生效。但多数 HDMI / DVI / DP 外接屏不支持软件亮度控制，这类屏幕关不掉 —— `lidkeep doctor` 会明确列出哪块屏不可控，不会让你以为它坏了。
 
 ## 防睡眠（合盖 / 电池 / 无显示器时不睡眠）
 
 黑屏只关背光，系统本身仍会按设置睡眠。如果需要黑屏期间机器持续工作（远程访问、下载、合盖外接使用），可以开启防睡眠：
 
 ```bash
-blankscreen nosleep setup                  # 一键到位：装助手 + 开关屏联动 + 立即防睡眠
-blankscreen nosleep on                     # 进程级（caffeinate，仅接电源时有效）
-blankscreen nosleep on --system            # 系统级（覆盖电池与合盖，需先装提权助手）
-blankscreen nosleep on --timeout 3600      # 定时自动停止
-blankscreen nosleep status                 # 查看层级 / 电源 / 已持续时间
-blankscreen nosleep off                    # 停止并复位
+lidkeep nosleep setup                  # 一键到位：装助手 + 开关屏联动 + 立即防睡眠
+lidkeep nosleep on                     # 进程级（caffeinate，仅接电源时有效）
+lidkeep nosleep on --system            # 系统级（覆盖电池与合盖，需先装提权助手）
+lidkeep nosleep on --timeout 3600      # 定时自动停止
+lidkeep nosleep status                 # 查看层级 / 电源 / 已持续时间
+lidkeep nosleep off                    # 停止并复位
 ```
 
 ### 合盖不睡眠（长期模式）
@@ -231,17 +255,17 @@ blankscreen nosleep off                    # 停止并复位
 也可以在设置面板勾选「合盖不睡眠（长期模式，重启自动恢复）」，或用命令行：
 
 ```bash
-blankscreen nosleep on --system            # 直接开启（需已装提权助手）
-blankscreen nosleep status                 # 查看「合盖模式」状态
-blankscreen nosleep off                    # 关闭并复位
+lidkeep nosleep on --system            # 直接开启（需已装提权助手）
+lidkeep nosleep status                 # 查看「合盖模式」状态
+lidkeep nosleep off                    # 关闭并复位
 ```
 
 **为什么系统级需要提权助手？** `caffeinate -s` 的断言按 man page 明写「仅 AC 电源有效」；要覆盖电池与合盖，只能调用 `pmset disablesleep`，而它必须以 root 运行。安装助手（一次性，需输入管理员密码）：
 
 ```bash
-sudo blankscreen nosleep install-helper    # 最小权限：sudoers 限定仅本工具、仅四个白名单参数
-blankscreen nosleep detect                 # 查看当前系统对 disablesleep 的支持情况
-sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
+sudo lidkeep nosleep install-helper    # 最小权限：sudoers 限定仅本工具、仅四个白名单参数
+lidkeep nosleep detect                 # 查看当前系统对 disablesleep 的支持情况
+sudo lidkeep nosleep uninstall-helper  # 卸载（先复位再删除）
 ```
 
 安全设计：
@@ -250,7 +274,7 @@ sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
 - sudoers 仅授权单用户、以 root 身份、精确匹配四个参数
 - 卸载时先复位 `disablesleep 0` 再删助手，杜绝「系统永不睡眠」残留
 - 开机 LaunchDaemon + 每次启动的自愈检查双保险：任何异常退出都会自动复位
-- **持有者记账**：`disablesleep` 是唯一的全局开关，而「关屏联动」和「手动防睡眠」可能同时依赖它。助手会记录每个持有者，任一方停止时只注销自己 —— 不会顺手关掉别人正在用的防睡眠。（记账目录为 `/var/db/blankscreen-nosleep`，root 拥有，普通用户无法伪造持有者）
+- **持有者记账**：`disablesleep` 是唯一的全局开关，而「关屏联动」和「手动防睡眠」可能同时依赖它。助手会记录每个持有者，任一方停止时只注销自己 —— 不会顺手关掉别人正在用的防睡眠。（记账目录为 `/var/db/lidkeep-nosleep`，root 拥有，普通用户无法伪造持有者）
 - **与远控软件共存**：ToDesk / Sunlogin / UURemote / TeamViewer 等远控会用同一个开关保持在线。检测到它们在运行时，`doctor` 会说明「由远控软件持有」，而不是误报成需要修复的残留。
 - 电量下限对防睡眠同样生效 —— 合盖 + 电池 + 不睡眠是最容易耗尽电池的组合
 
@@ -258,7 +282,7 @@ sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
 
 ```bash
 ./uninstall.sh           # 或: make uninstall
-# 配置与日志（可选）: rm -rf ~/Library/Application\ Support/blankscreen
+# 配置与日志（可选）: rm -rf ~/Library/Application\ Support/LidKeep
 ```
 
 ## 常见问题
@@ -271,7 +295,7 @@ sudo blankscreen nosleep uninstall-helper  # 卸载（先复位再删除）
 
 **省多少电？** 背光关闭约省 1–2 W（轻载整机约 15–30%）。GPU / 合成器仍在工作，这是「远程可控」的必要代价。
 
-**电量保护是怎么工作的？** 仅在「使用电池且正在放电」时生效：电量低于下限（默认 20%）会拒绝进入黑屏；黑屏期间每 30 秒复查一次，跌破下限立即恢复显示并发系统通知。插着电源时完全不干预。可在设置面板或 `blankscreen config --battery 0` 关闭。
+**电量保护是怎么工作的？** 仅在「使用电池且正在放电」时生效：电量低于下限（默认 20%）会拒绝进入黑屏；黑屏期间每 30 秒复查一次，跌破下限立即恢复显示并发系统通知。插着电源时完全不干预。可在设置面板或 `lidkeep config --battery 0` 关闭。
 
 ## 开发
 
@@ -293,7 +317,7 @@ make clean
 
 ## 已知限制
 
-- **部分外接显示器关不掉。** 亮度归零依赖软件亮度接口，多数 HDMI / DVI / DP 外接屏不支持它，这类屏幕在关屏时不会熄灭（`blankscreen doctor` 会具体指出是哪一块）。要让它们也熄灭只能走硬件睡眠，而那会中断远程画面 —— 本工具刻意不这么做。
+- **部分外接显示器关不掉。** 亮度归零依赖软件亮度接口，多数 HDMI / DVI / DP 外接屏不支持它，这类屏幕在关屏时不会熄灭（`lidkeep doctor` 会具体指出是哪一块）。要让它们也熄灭只能走硬件睡眠，而那会中断远程画面 —— 本工具刻意不这么做。
 - 屏幕**并非断电** —— 这是刻意设计。背光被设为 0，帧缓冲仍在渲染，因此屏幕共享 / 远程桌面仍能正常取帧。真正的显示器休眠会中断远程访问，详见[它是怎么做到的](#它是怎么做到的)。
 - **关屏不等于锁屏。** 关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。离开座位前请手动锁屏（⌃⌘Q）。
 

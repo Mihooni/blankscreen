@@ -1,8 +1,8 @@
 #!/bin/bash
 # 构建 macOS 安装包（.pkg）
 #
-# 产物:  build/pkgout/BlankScreen-<version>.pkg
-# 内容:  /Applications/BlankScreenBar.app + /usr/local/bin/blankscreen
+# 产物:  build/pkgout/LidKeep-<version>.pkg
+# 内容:  /Applications/LidKeep.app + /usr/local/bin/lidkeep
 #
 # 用法:  ./packaging/make_pkg.sh [版本号]
 #        版本号缺省时取最近的 git tag（去 v 前缀）
@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # 关键：禁止 cp 生成 ._xxx AppleDouble 元数据文件。
-# 否则 payload 里会混进 ._blankscreen / ._usr / ._CodeSignature 之类的垃圾文件，
+# 否则 payload 里会混进 ._lidkeep / ._usr / ._CodeSignature 之类的垃圾文件，
 # 既污染安装包，又可能在安装后留下无意义的隐藏文件。
 export COPYFILE_DISABLE=1
 
@@ -22,15 +22,15 @@ if [ -z "$VER" ]; then
 fi
 [ -z "$VER" ] && VER="1.1.1"
 
-IDENT="com.blankscreen"
+IDENT="com.lidkeep"
 STAGE="build/pkg"
 OUT="build/pkgout"
-COMP="$STAGE/BlankScreen-component.pkg"
+COMP="$STAGE/LidKeep-component.pkg"
 
 echo "==> 版本号: $VER"
 
 # 确保已构建（make all 产出 universal 二进制）
-if [ ! -f build/blankscreen ] || [ ! -d build/BlankScreenBar.app ]; then
+if [ ! -f build/lidkeep ] || [ ! -d build/LidKeep.app ]; then
   echo "==> 未发现构建产物，先执行 make all"
   make all >/dev/null
 fi
@@ -43,9 +43,9 @@ mkdir -p "$STAGE/payload/usr/local/bin" \
          "$OUT"
 
 # ---- 组装 payload ----
-cp build/blankscreen "$STAGE/payload/usr/local/bin/blankscreen"
-chmod 755 "$STAGE/payload/usr/local/bin/blankscreen"
-cp -R build/BlankScreenBar.app "$STAGE/payload/Applications/"
+cp build/lidkeep "$STAGE/payload/usr/local/bin/lidkeep"
+chmod 755 "$STAGE/payload/usr/local/bin/lidkeep"
+cp -R build/LidKeep.app "$STAGE/payload/Applications/"
 # 清掉 AppleDouble / .DS_Store 等杂项，避免打进包里
 find "$STAGE/payload" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 REMAIN=$(find "$STAGE/payload" -name '._*' 2>/dev/null | wc -l | tr -d ' ')
@@ -76,7 +76,7 @@ pkgbuild --identifier "$IDENT" \
          "$COMP"
 
 # ---- 产品归档（带许可协议与说明的安装器 UI）----
-FINAL="$OUT/BlankScreen-$VER.pkg"
+FINAL="$OUT/LidKeep-$VER.pkg"
 echo "==> 打包安装器"
 if productbuild --distribution "$STAGE/Distribution.xml" \
                 --package-path "$STAGE" \

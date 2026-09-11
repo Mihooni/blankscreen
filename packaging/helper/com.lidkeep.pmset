@@ -1,5 +1,5 @@
 #!/bin/sh
-# com.blankscreen.pmset —— 以 root 执行的极窄权限助手
+# com.lidkeep.pmset —— 以 root 执行的极窄权限助手
 #
 # 存在的唯一理由：caffeinate -s 的断言仅在 AC 电源下有效（见 man caffeinate），
 # 因此「电池供电」与「合盖」两种防睡眠场景无法用进程级断言实现，
@@ -19,7 +19,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
 PMS=/usr/bin/pmset
-LOG_TAG=com.blankscreen.pmset
+LOG_TAG=com.lidkeep.pmset
 
 # 持有者目录（root:wheel，普通用户不可写）。
 #
@@ -28,7 +28,7 @@ LOG_TAG=com.blankscreen.pmset
 # 任何一方关闭都会顺手把另一方的防睡眠也关掉（互相踩踏）。
 #
 # 记账放在 root 拥有的目录里，普通用户无法伪造持有者来阻止复位。
-OWNDIR=/var/db/blankscreen-nosleep
+OWNDIR=/var/db/lidkeep-nosleep
 
 # 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
 # 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
@@ -54,7 +54,7 @@ prune_owners() {
         opid=${f##*/}
         case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
         case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
-            *blankscreen*|*BlankScreenBar*) ;;
+            *lidkeep*|*LidKeep*) ;;
             *) rm -f "$f" ;;
         esac
     done
@@ -67,7 +67,7 @@ owner_count() {
 }
 
 usage() {
-    echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
+    echo "usage: com.lidkeep.pmset on|off|status|detect" >&2
     exit 2
 }
 

@@ -1,4 +1,4 @@
-// blankscreen —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
+// lidkeep —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
 //
 // 设计要点:
 //  1. 采用「亮度归零」而非「显示器硬件睡眠」，确保屏幕共享/远程桌面仍能正常抓帧，
@@ -8,7 +8,7 @@
 //  3. 以 0.5s 周期重设亮度为 0，压制环境光自动亮度。
 //  4. 两种运行形态:
 //     - 常驻服务(launchd): 热键 / CLI 信号 均可切换开关，开机自启
-//     - 一次性 daemon:     `blankscreen off` 进入，恢复后进程退出
+//     - 一次性 daemon:     `lidkeep off` 进入，恢复后进程退出
 import Foundation
 import CoreGraphics
 import AppKit
@@ -18,19 +18,19 @@ import Darwin
 
 // MARK: - 路径
 let home = NSHomeDirectory()
-let base = home + "/Library/Application Support/blankscreen"
+let base = home + "/Library/Application Support/LidKeep"
 let stateFile = base + "/brightness.state"     // 存在即表示处于黑屏（同时保存待恢复亮度）
 let pidFile = base + "/daemon.pid"             // 一次性 daemon
 let serviceFile = base + "/service.pid"        // 常驻服务
 let configFile = base + "/config.json"         // 持久化热键等配置
-let plistFile = home + "/Library/LaunchAgents/com.blankscreen.agent.plist"
-let logPath = base + "/blankscreen.log"
+let plistFile = home + "/Library/LaunchAgents/com.lidkeep.agent.plist"
+let logPath = base + "/LidKeep.log"
 let commandFile = base + "/command"        // CLI -> 菜单栏 App 的指令文件
 // 关屏被拒绝（电量过低 / 亮度接口不可用）时，常驻进程把原因写这里，
 // 让发起命令的 CLI 能读到并明确提示用户，而不是只说「指令已发送」。
 let rejectFile = base + "/reject"
 let serviceLog = base + "/service.log"
-let label = "com.blankscreen.agent"
+let label = "com.lidkeep.agent"
 
 // MARK: - 防睡眠（nosleep）
 // caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，所以「电池供电」和
@@ -41,11 +41,56 @@ let label = "com.blankscreen.agent"
 let nosleepPidFile = base + "/nosleep.pid"          // 防睡眠守护进程
 let nosleepStateFile = base + "/nosleep.state"      // 记录当前层级与开启时间
 let helperDir = "/Library/PrivilegedHelperTools"
-let helperPath = helperDir + "/com.blankscreen.pmset"
-let sudoersPath = "/etc/sudoers.d/blankscreen"
-let resetDaemon = "/Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist"
+let helperPath = helperDir + "/com.lidkeep.pmset"
+let sudoersPath = "/etc/sudoers.d/lidkeep"
+let resetDaemon = "/Library/LaunchDaemons/com.lidkeep.nosleep.reset.plist"
 
 let fm = FileManager.default
+
+// MARK: - v2.0.0 更名迁移（BlankScreen → LidKeep）
+// 产品在 v2.0.0 更名为 LidKeep，bundle id、配置目录与系统级组件路径全部改变。
+// 不做迁移会留下三类残留，其中第 3 类会直接导致功能异常：
+//   1. 用户配置丢失 —— 目录改名后新版本读不到热键、超时、电量等设置
+//   2. 旧登录项指向已不存在的可执行文件，每次登录都失败一次
+//   3. 旧系统级 helper 与 /var/db/blankscreen-nosleep 持有者账本仍在，与新版本
+//      的账本互不可见。老版本开过系统级防睡眠后，新版本无法把系统复位
+//      （disablesleep 是持久全局开关，没有任何界面会提示它开着）
+// 迁移必须幂等：每次启动都跑一遍，代价只有几次 stat。
+func migrateLegacyUserState() {
+    // 1) 配置目录整体改名。仅当新目录不存在时才动，避免覆盖新版本已有配置。
+    let legacyBaseDir = home + "/Library/Application Support/blankscreen"
+    if fm.fileExists(atPath: legacyBaseDir), !fm.fileExists(atPath: base) {
+        try? fm.moveItem(atPath: legacyBaseDir, toPath: base)
+    }
+    // 2) 旧日志文件名（目录整体改名会把它一起带过来）
+    let legacyLog = base + "/blankscreen.log"
+    if fm.fileExists(atPath: legacyLog) {
+        if fm.fileExists(atPath: logPath) { try? fm.removeItem(atPath: legacyLog) }
+        else { try? fm.moveItem(atPath: legacyLog, toPath: logPath) }
+    }
+    // 3) 旧登录项：先 bootout 再删 plist。只删文件不 bootout 的话，launchd 中
+    //    仍留着指向失效路径的注册项。
+    for l in ["com.blankscreen.bar", "com.blankscreen.agent"] {
+        let p = home + "/Library/LaunchAgents/\(l).plist"
+        guard fm.fileExists(atPath: p) else { continue }
+        _ = runCapture("/bin/launchctl", ["bootout", "gui/\(getuid())/\(l)"])
+        try? fm.removeItem(atPath: p)
+    }
+}
+
+/// 旧版本系统级 / 应用级残留的只读清单。删除它们需要 root 或卸载 App，
+/// 因此 doctor 只负责报告，由用户显式执行 `lidkeep nosleep uninstall-helper` 清理。
+func legacyLeftovers() -> [String] {
+    [
+        "/Library/PrivilegedHelperTools/com.blankscreen.pmset",
+        "/etc/sudoers.d/blankscreen",
+        "/Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist",
+        "/var/db/blankscreen-nosleep",
+        "/Applications/BlankScreenBar.app",
+    ].filter { fm.fileExists(atPath: $0) }
+}
+
+migrateLegacyUserState()
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
 func log(_ s: String) {
@@ -85,7 +130,7 @@ func runCapture(_ exe: String, _ a: [String]) -> String? {
 // MARK: - 进程归属校验
 // 仅用 kill(pid,0) 判断进程存活是不够的：进程退出后 pid 会被系统复用，
 // 此时向该 pid 发 SIGUSR1 会打到无关进程上（SIGUSR1 默认动作是终止！）。
-// 因此必须核对 pid 对应的可执行文件路径确实属于 blankscreen。
+// 因此必须核对 pid 对应的可执行文件路径确实属于 lidkeep。
 func procPath(_ pid: Int32) -> String? {
     var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
     let n = proc_pidpath(pid, &buf, UInt32(buf.count))
@@ -94,8 +139,8 @@ func procPath(_ pid: Int32) -> String? {
 /// 取不到路径时返回 true（保持原有行为，避免因权限等因素误判导致功能不可用）
 func isOurs(_ pid: Int32) -> Bool {
     guard let p = procPath(pid) else { return true }
-    // 同时覆盖 /opt/homebrew/bin/blankscreen 与 .../BlankScreenBar.app/.../BlankScreenBar
-    return p.lowercased().contains("blankscreen")
+    // 同时覆盖 /opt/homebrew/bin/lidkeep 与 .../LidKeep.app/.../LidKeep
+    return p.lowercased().contains("lidkeep")
 }
 
 // MARK: - 轮询等待（比固定 usleep 可靠：慢机器上不会误判超时）
@@ -109,7 +154,7 @@ func waitUntil(timeout: TimeInterval, _ predicate: () -> Bool) -> Bool {
 }
 
 // MARK: - 配置（常驻服务经 launchd 启动，无法传命令行参数，故持久化）
-// 与 BlankScreenBar.app 共用同一个 config.json；字段全部可缺省，旧版文件仍能读取
+// 与 LidKeep.app 共用同一个 config.json；字段全部可缺省，旧版文件仍能读取
 let MOD_CTRL: UInt64  = 1 << 18
 let MOD_ALT: UInt64   = 1 << 19
 let MOD_CMD: UInt64   = 1 << 20
@@ -287,10 +332,10 @@ struct Battery { var onBattery = false, discharging = false, percent = 100 }
 
 func batteryStatus() -> Battery {
     var b = Battery()
-    // 测试钩子：BS_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"
-    // 例: BS_SIMULATE_BATTERY="15,batt,discharging" blankscreen off
+    // 测试钩子：LK_SIMULATE_BATTERY="电量,batt|ac,discharging|charging"
+    // 例: LK_SIMULATE_BATTERY="15,batt,discharging" lidkeep off
     // 仅供验证电量保护路径（插电的机器无法真实触发），正式使用不需要也不读取它。
-    if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_BATTERY"] {
+    if let sim = ProcessInfo.processInfo.environment["LK_SIMULATE_BATTERY"] {
         let parts = sim.lowercased().split(separator: ",").map(String.init)
         if let p = parts.first, let v = Int(p), (0...100).contains(v) {
             b.percent = v
@@ -310,7 +355,7 @@ func batteryStatus() -> Battery {
 
 func notify(_ msg: String) {
     let safe = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-    _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"BlankScreen\""])
+    _ = runCapture("/usr/bin/osascript", ["-e", "display notification \"\(safe)\" with title \"LidKeep\""])
 }
 
 // MARK: - 合盖检测（SMC MSLD 键）
@@ -411,10 +456,10 @@ final class SMCLid {
 
     /// 合盖状态：true = 已合盖。nil = 本机无法检测（台式机 / 虚拟机属正常）。
     ///
-    /// 测试钩子：BS_SIMULATE_LID_CLOSED=1/0 强行指定合盖状态。
+    /// 测试钩子：LK_SIMULATE_LID_CLOSED=1/0 强行指定合盖状态。
     /// 仅供冒烟测试在「盖子无法物理开合」的环境里驱动熄屏/恢复路径，正式使用不读取。
     func lidClosed() -> Bool? {
-        if let sim = ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] {
+        if let sim = ProcessInfo.processInfo.environment["LK_SIMULATE_LID_CLOSED"] {
             let v = sim.lowercased()
             return v == "1" || v == "yes" || v == "true" || v == "closed"
         }
@@ -557,11 +602,11 @@ func recoverStaleNosleep() {
 //
 // 资产内嵌在二进制里，而不是随包附带散文件：CLI 可能被拷到任何位置，
 // 依赖同目录文件会让它换个地方就失效。packaging/helper/ 下的同名文件由
-// `blankscreen nosleep write-assets` 生成，便于人工审计与 CI 校验一致性。
+// `lidkeep nosleep write-assets` 生成，便于人工审计与 CI 校验一致性。
 
 let helperScript = #"""
 #!/bin/sh
-# com.blankscreen.pmset —— 以 root 执行的极窄权限助手
+# com.lidkeep.pmset —— 以 root 执行的极窄权限助手
 #
 # 存在的唯一理由：caffeinate -s 的断言仅在 AC 电源下有效（见 man caffeinate），
 # 因此「电池供电」与「合盖」两种防睡眠场景无法用进程级断言实现，
@@ -581,7 +626,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
 PMS=/usr/bin/pmset
-LOG_TAG=com.blankscreen.pmset
+LOG_TAG=com.lidkeep.pmset
 
 # 持有者目录（root:wheel，普通用户不可写）。
 #
@@ -590,7 +635,7 @@ LOG_TAG=com.blankscreen.pmset
 # 任何一方关闭都会顺手把另一方的防睡眠也关掉（互相踩踏）。
 #
 # 记账放在 root 拥有的目录里，普通用户无法伪造持有者来阻止复位。
-OWNDIR=/var/db/blankscreen-nosleep
+OWNDIR=/var/db/lidkeep-nosleep
 
 # 找到真正的调用者 pid：本脚本的祖先链是 helper -> sudo -> 调用者。
 # 逐级上溯并跳过 sudo 自身，取第一个非 sudo 的进程。
@@ -616,7 +661,7 @@ prune_owners() {
         opid=${f##*/}
         case "$opid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
         case "$(/bin/ps -o comm= -p "$opid" 2>/dev/null)" in
-            *blankscreen*|*BlankScreenBar*) ;;
+            *lidkeep*|*LidKeep*) ;;
             *) rm -f "$f" ;;
         esac
     done
@@ -629,7 +674,7 @@ owner_count() {
 }
 
 usage() {
-    echo "usage: com.blankscreen.pmset on|off|status|detect" >&2
+    echo "usage: com.lidkeep.pmset on|off|status|detect" >&2
     exit 2
 }
 
@@ -690,7 +735,7 @@ let resetPlist = #"""
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  com.blankscreen.nosleep.reset —— 开机时把 disablesleep 复位为 0。
+  com.lidkeep.nosleep.reset —— 开机时把 disablesleep 复位为 0。
 
   为什么必须有它：
   pmset disablesleep 是**持久**的全局设置，写入后即使进程被 SIGKILL 也仍然生效。
@@ -703,7 +748,7 @@ let resetPlist = #"""
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.blankscreen.nosleep.reset</string>
+    <string>com.lidkeep.nosleep.reset</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/pmset</string>
@@ -732,21 +777,28 @@ func installHelperScript(_ user: String) -> String {
     let part1 = """
     #!/bin/sh
     set -e
+    # v2.0.0 更名：先清掉旧版 BlankScreen 的系统级组件。留着它们会让新旧两套
+    # 持有者账本并存 —— 新版本读不到旧账本，会出现「已退出却仍不睡眠」。
+    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
+    /bin/rm -f /Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist
+    /bin/rm -f /etc/sudoers.d/blankscreen
+    /bin/rm -f /Library/PrivilegedHelperTools/com.blankscreen.pmset
+
     H="\(helperPath)"
     S="\(sudoersPath)"
     D="\(resetDaemon)"
 
     /bin/mkdir -p \(helperDir)
-    /bin/cat > "$H" <<'BLANKSCREEN_HELPER_EOF'
+    /bin/cat > "$H" <<'LIDKEEP_HELPER_EOF'
     """
     let part2 = """
-    BLANKSCREEN_HELPER_EOF
+    LIDKEEP_HELPER_EOF
     /usr/sbin/chown root:wheel "$H"; /bin/chmod 755 "$H"
 
-    /bin/cat > "$S" <<'BLANKSCREEN_SUDOERS_EOF'
+    /bin/cat > "$S" <<'LIDKEEP_SUDOERS_EOF'
     """
     let part3 = """
-    BLANKSCREEN_SUDOERS_EOF
+    LIDKEEP_SUDOERS_EOF
     /usr/sbin/chown root:wheel "$S"; /bin/chmod 440 "$S"
 
     # 写坏 sudoers 会让整台机器无法提权，所以必须先校验；失败立即回滚。
@@ -756,10 +808,10 @@ func installHelperScript(_ user: String) -> String {
         exit 1
     fi
 
-    /bin/cat > "$D" <<'BLANKSCREEN_PLIST_EOF'
+    /bin/cat > "$D" <<'LIDKEEP_PLIST_EOF'
     """
     let part4 = """
-    BLANKSCREEN_PLIST_EOF
+    LIDKEEP_PLIST_EOF
     /usr/sbin/chown root:wheel "$D"; /bin/chmod 644 "$D"
 
     echo "installed"
@@ -778,11 +830,17 @@ func uninstallHelperScript() -> String {
     """
     #!/bin/sh
     /usr/bin/pmset disablesleep 0 2>/dev/null || true
-    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
-    /bin/rm -rf /var/db/blankscreen-nosleep
+    /bin/launchctl bootout system/com.lidkeep.nosleep.reset 2>/dev/null || true
+    /bin/rm -rf /var/db/lidkeep-nosleep
     /bin/rm -f \(resetDaemon)
     /bin/rm -f \(sudoersPath)
     /bin/rm -f \(helperPath)
+    # v2.0.0 更名：连带清掉旧版遗留，保证「卸载」真的干净
+    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
+    /bin/rm -rf /var/db/blankscreen-nosleep
+    /bin/rm -f /Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist
+    /bin/rm -f /etc/sudoers.d/blankscreen
+    /bin/rm -f /Library/PrivilegedHelperTools/com.blankscreen.pmset
     echo "uninstalled"
     """
 }
@@ -932,8 +990,8 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
     log((L("nosleep 启动 pid=") + "\(myPid)" + L(" 层级=") + "\(level)"))
 
     // 合盖检测启用：SMC 读得到 MSLD 才开（笔记本）。台式机 / 虚拟机读不到，静默禁用。
-    // BS_SIMULATE_LID_CLOSED 存在时无条件启用（冒烟测试驱动熄屏/恢复路径）。
-    let simLid = ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] != nil
+    // LK_SIMULATE_LID_CLOSED 存在时无条件启用（冒烟测试驱动熄屏/恢复路径）。
+    let simLid = ProcessInfo.processInfo.environment["LK_SIMULATE_LID_CLOSED"] != nil
     // 「合盖后黑屏」是独立开关：关掉时机器照样不睡，只是不再主动熄屏
     // （个别机型熄屏后亮度回不来，这条就是退路）。
     let blackoutOn = loadConfig().lidBlackout
@@ -952,7 +1010,7 @@ func runNosleepDaemon(timeout: TimeInterval?, wantSystem: Bool) -> Never {
         }
     } else if simLid {
         lidMonitorOn = true
-        log((L("lid: 测试模式（BS_SIMULATE_LID_CLOSED=") + "\(ProcessInfo.processInfo.environment["BS_SIMULATE_LID_CLOSED"] ?? "")" + L("）")))
+        log((L("lid: 测试模式（LK_SIMULATE_LID_CLOSED=") + "\(ProcessInfo.processInfo.environment["LK_SIMULATE_LID_CLOSED"] ?? "")" + L("）")))
     } else {
         log(L("lid: 无法读取 SMC 合盖状态（台式机/虚拟机属正常），合盖熄屏已禁用"))
         lidSMC.close()
@@ -1075,7 +1133,7 @@ func installHotkey(keyCode: Int64, modFlags: UInt64 = MOD_CTRL | MOD_ALT | MOD_C
     if st == noErr {
         log((L("全局热键已注册 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("（Carbon 链路，无需授权）")))
     } else if st == OSStatus(eventHotKeyExistsErr) {
-        log((L("热键注册失败 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("：组合已被其他 App 占用（blankscreen config --mods ... --key ... 换一个）")))
+        log((L("热键注册失败 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + L("：组合已被其他 App 占用（lidkeep config --mods ... --key ... 换一个）")))
     } else {
         log((L("热键注册失败 ") + "\(modsText(modFlags))" + "\(keyName(keyCode))" + " status=" + "\(st)"))
     }
@@ -1109,13 +1167,13 @@ func runDaemon(keyCode: Int64, timeout: TimeInterval?) -> Never {
             errBody = """
             Error: \(m)
             This tool needs that framework to set brightness to 0. Please report your macOS version at
-            https://github.com/Mihooni/blankscreen/issues
+            https://github.com/Mihooni/lidkeep/issues
             """
         } else {
             errBody = """
             错误：\(m)
             本工具依赖该框架把亮度置 0 实现关屏。请在
-            https://github.com/Mihooni/blankscreen/issues 反馈你的系统版本。
+            https://github.com/Mihooni/lidkeep/issues 反馈你的系统版本。
             """
         }
         FileHandle.standardError.write(errBody.data(using: .utf8)!)
@@ -1429,7 +1487,7 @@ func servicePid() -> Int32? {
           kill(pid, 0) == 0 else { return nil }
     // pid 可能已被系统复用于无关进程：此时绝不能发信号（SIGUSR1 默认动作是终止）
     guard isOurs(pid) else {
-        log((L("service.pid 中的 pid=") + "\(pid)" + L(" 已不属于 blankscreen（pid 被复用），清理陈旧记录")))
+        log((L("service.pid 中的 pid=") + "\(pid)" + L(" 已不属于 lidkeep（pid 被复用），清理陈旧记录")))
         try? fm.removeItem(atPath: serviceFile)
         return nil
     }
@@ -1441,7 +1499,7 @@ func daemonRunning() -> (pid: Int32, brightness: String)? {
           kill(pid, 0) == 0,
           let b = try? String(contentsOfFile: stateFile, encoding: .utf8) else { return nil }
     guard isOurs(pid) else {
-        log((L("daemon.pid 中的 pid=") + "\(pid)" + L(" 已不属于 blankscreen（pid 被复用），清理陈旧记录")))
+        log((L("daemon.pid 中的 pid=") + "\(pid)" + L(" 已不属于 lidkeep（pid 被复用），清理陈旧记录")))
         try? fm.removeItem(atPath: pidFile)
         return nil
     }
@@ -1488,7 +1546,7 @@ func startOneShotDaemon(extra: [String]) -> Int32 {
     _ = waitUntil(timeout: 3.0) { daemonRunning() != nil }
     if let r = daemonRunning() {
         print((L("已进入黑屏模式 pid=") + "\(r.pid)" + L(" 原亮度=") + "\(r.brightness)"))
-        print((L("恢复方式: 热键 ") + "\(modsText(loadConfig().modFlags))" + "\(keyName(loadConfig().keyCode))" + L("  /  blankscreen on  /  远程执行同一命令")))
+        print((L("恢复方式: 热键 ") + "\(modsText(loadConfig().modFlags))" + "\(keyName(loadConfig().keyCode))" + L("  /  lidkeep on  /  远程执行同一命令")))
         return 0
     }
     if let reason = rejectReason() {
@@ -1500,7 +1558,7 @@ func startOneShotDaemon(extra: [String]) -> Int32 {
 }
 
 /// 父进程已经消失的 caffeinate —— 真的孤儿（正常 caffeinate -w 会随父进程自动退出）。
-/// 刻意不把「父进程不是 blankscreen」算作孤儿：用户自己起的 caffeinate 不该被误报。
+/// 刻意不把「父进程不是 lidkeep」算作孤儿：用户自己起的 caffeinate 不该被误报。
 func orphanCaffeinate() -> [Int32] {
     guard let out = runCapture("/usr/bin/pgrep", ["-x", "caffeinate"]) else { return [] }
     var res: [Int32] = []
@@ -1536,12 +1594,12 @@ func capture(_ s: String, _ pattern: String, group: Int = 1) -> String? {
 ///
 /// caffeinate 的断言名恒为 "caffeinate command-line tool"，与任何第三方 caffeinate
 /// 完全无法区分（正如 WorkBuddy 与小米互联服务的断言都叫 "Electron"）。因此改从
-/// 亲缘关系判定：父进程是 blankscreen 家族即视为本程序持有。
+/// 亲缘关系判定：父进程是 lidkeep 家族即视为本程序持有。
 func assertionOwnerIsOurs(_ pid: Int32) -> Bool {
     guard let pps = runCapture("/bin/ps", ["-o", "ppid=", "-p", String(pid)]),
           let ppid = Int32(pps.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
     let cmd = runCapture("/bin/ps", ["-o", "command=", "-p", String(ppid)]) ?? ""
-    return cmd.contains("blankscreen") || cmd.contains("BlankScreenBar")
+    return cmd.contains("lidkeep") || cmd.contains("LidKeep")
 }
 
 /// 当前系统里所有「阻止睡眠」的断言持有者 —— 用户问「谁不让我的 Mac 睡」时的唯一权威答案。
@@ -1575,7 +1633,7 @@ func runDoctor() -> Int32 {
     var errors: [String] = []
     var warns: [String] = []
 
-    print((L("BlankScreen 诊断 —— v") + "\(BS_VERSION)" + " (" + "\(BS_COMMIT)" + ")"))
+    print((L("LidKeep 诊断 —— v") + "\(LK_VERSION)" + " (" + "\(LK_COMMIT)" + ")"))
     print((L("系统: ") + "\(ProcessInfo.processInfo.operatingSystemVersionString)"))
 
     print(L("\n【关屏能力】"))
@@ -1606,7 +1664,7 @@ func runDoctor() -> Int32 {
           + (L("电量下限 ") + "\(c.batteryFloor)" + L("%　关屏联动防睡眠 ") + "\(c.autoNosleep ? L("开") : L("关"))"))
     if c.modFlags == 0 {
         errors.append(L("热键无修饰键"))
-        print(L("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（blankscreen config --mods cmd,shift --key 0）"))
+        print(L("  ❌ 热键未带修饰键：系统不会注册，等于没有热键（lidkeep config --mods cmd,shift --key 0）"))
     }
 
     print(L("\n【常驻进程】"))
@@ -1617,7 +1675,7 @@ func runDoctor() -> Int32 {
     } else {
         warns.append(L("无常驻进程"))
         print(L("  ⚠️  没有常驻进程：热键不可用，只能用 CLI 命令开关屏幕"))
-        print(L("     → 启动菜单栏 App，或安装 CLI 常驻服务（blankscreen service install）"))
+        print(L("     → 启动菜单栏 App，或安装 CLI 常驻服务（lidkeep service install）"))
     }
     if fm.fileExists(atPath: serviceFile) && servicePid() == nil {
         warns.append(L("service.pid 陈旧"))
@@ -1626,11 +1684,11 @@ func runDoctor() -> Int32 {
     if fm.fileExists(atPath: stateFile), servicePid() == nil, daemonRunning() == nil {
         errors.append(L("残留黑屏状态"))
         print(L("  ❌ brightness.state 存在但没有任何进程维持黑屏 —— 上次崩溃的残留，屏幕可能仍黑着"))
-        print(L("     → 执行 `blankscreen on` 恢复，或重启菜单栏 App 自动自愈"))
+        print(L("     → 执行 `lidkeep on` 恢复，或重启菜单栏 App 自动自愈"))
     }
 
     print(L("\n【开机自启】"))
-    let bar = runProbe("com.blankscreen.bar")
+    let bar = runProbe("com.lidkeep.bar")
     let agent = runProbe(label)
     print((L("  菜单栏 App: ") + "\(bar ? L("✅ 已注册") : L("未注册（设置里勾选「登录时启动」）"))"))
     print((L("  CLI 常驻服务: ") + "\(agent ? L("已注册") : L("未注册"))"))
@@ -1649,7 +1707,7 @@ func runDoctor() -> Int32 {
         if helperOutdated() {
             warns.append(L("提权助手过旧"))
             print(L("  ⚠️  提权助手版本过旧：缺少「多持有者记账」，关屏联动与手动防睡眠会互相关掉对方"))
-            print(L("     → 重新安装：blankscreen nosleep install-helper --force（需输入一次密码）"))
+            print(L("     → 重新安装：lidkeep nosleep install-helper --force（需输入一次密码）"))
         }
         print((L("  系统级开关: ") + "\(systemSleepDisabled() ? L("开启（系统当前不会睡眠）") : L("关闭"))"))
         if let pid = nosleepPid() { print((L("  守护进程: 运行中 pid=") + "\(pid)")) }
@@ -1658,12 +1716,12 @@ func runDoctor() -> Int32 {
                 print((L("  ℹ️ 无本程序守护，但检测到远控软件 ") + "\(app)" + L(" 在运行——系统级开关由其持有以保持远程可用，属正常共存，无需处理")))
             } else {
                 errors.append(L("disablesleep 残留"))
-                print(L("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `blankscreen nosleep off` 复位"))
+                print(L("  ❌ 没有守护进程在跑，系统级防睡眠却仍开着 —— 执行 `lidkeep nosleep off` 复位"))
             }
         }
     } else {
         print(L("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠"))
-        print(L("     → 一键安装：blankscreen nosleep setup"))
+        print(L("     → 一键安装：lidkeep nosleep setup"))
     }
 
     print(L("\n【电源断言】"))
@@ -1716,6 +1774,16 @@ func runDoctor() -> Int32 {
         }
     }
 
+    // 更名残留：只在真的存在时才输出本节，避免每次 doctor 都多一段噪音
+    let legacy = legacyLeftovers()
+    if !legacy.isEmpty {
+        print(L("\n【更名残留】"))
+        warns.append(L("BlankScreen 旧版残留"))
+        print(L("  ⚠️  检测到旧版 BlankScreen 的组件仍在（新旧两套防睡眠账本互相不可见）："))
+        for p in legacy { print("      " + p) }
+        print(L("  → 清理：sudo lidkeep nosleep uninstall-helper（会同时复位系统级防睡眠）"))
+    }
+
     print("")
     if !errors.isEmpty {
         print((L("结论：❌ ") + "\(errors.count)" + L(" 个问题需要修复 —— ") + "\(errors.joined(separator: L("；")))"))
@@ -1750,8 +1818,8 @@ case "service":
     switch sub {
     case "install":
         // 菜单栏 App 已注册为常驻服务时，CLI 服务不再安装（功能完全重叠，会互相抢状态）
-        if runProbe("com.blankscreen.bar") {
-            print(L("检测到菜单栏 App（BlankScreenBar）已注册为常驻服务。"))
+        if runProbe("com.lidkeep.bar") {
+            print(L("检测到菜单栏 App（LidKeep）已注册为常驻服务。"))
             print(L("两者功能完全重叠，同时运行会互相抢占状态。"))
             print(L("→ 建议：直接使用菜单栏 App，无需安装本 CLI 服务。"))
             print(L("→ 如确实要改用 CLI 服务，请先在菜单栏设置中关闭「登录时启动」。"))
@@ -1782,7 +1850,7 @@ case "service":
         usleep(900_000)
         if let pid = servicePid() {
             print((L("常驻服务已启动 pid=") + "\(pid)"))
-            print(L("  热键 ⌃⌥⌘B 直接开关；也可用 blankscreen off / on"))
+            print(L("  热键 ⌃⌥⌘B 直接开关；也可用 lidkeep off / on"))
             print((L("  开机自启，日志: ") + "\(serviceLog)"))
         } else {
             let plistBody: String
@@ -1792,10 +1860,10 @@ case "service":
                 but this environment cannot talk to launchd (common when invoked from a sandbox or automation).
 
                 Run this manually in Terminal:
-                  blankscreen service install
+                  lidkeep service install
 
                 Temporary resident mode (no launchd, lost after reboot):
-                  nohup blankscreen daemon --service >/dev/null 2>&1 &
+                  nohup lidkeep daemon --service >/dev/null 2>&1 &
                 """
             } else {
                 plistBody = """
@@ -1803,10 +1871,10 @@ case "service":
                 但当前环境无法与 launchd 通信（被沙箱或自动化环境调用时常见）。
 
                 请在「终端」里手动执行:
-                  blankscreen service install
+                  lidkeep service install
 
                 临时常驻（不依赖 launchd，重启后失效）:
-                  nohup blankscreen daemon --service >/dev/null 2>&1 &
+                  nohup lidkeep daemon --service >/dev/null 2>&1 &
                 """
             }
             print(plistBody)
@@ -1821,10 +1889,10 @@ case "service":
         if let pid = servicePid() {
             print((L("常驻服务: 运行中 pid=") + "\(pid)" + L("，") + "\(fm.fileExists(atPath: stateFile) ? L("当前黑屏中") : L("当前正常显示"))"))
         } else {
-            print(L("常驻服务: 未运行（用 `blankscreen service install` 启用）"))
+            print(L("常驻服务: 未运行（用 `lidkeep service install` 启用）"))
         }
     default:
-        print(L("用法: blankscreen service install | uninstall | status"))
+        print(L("用法: lidkeep service install | uninstall | status"))
     }
 
 // MARK: - 防睡眠
@@ -1846,7 +1914,7 @@ case "nosleep":
     case "on":
         recoverStaleNosleep()
         if let pid = nosleepPid() {
-            print((L("防睡眠已在运行 pid=") + "\(pid)" + L("（用 `blankscreen nosleep off` 关闭）")))
+            print((L("防睡眠已在运行 pid=") + "\(pid)" + L("（用 `lidkeep nosleep off` 关闭）")))
             exit(0)
         }
         var wantSystem = false
@@ -1871,7 +1939,7 @@ case "nosleep":
         if wantSystem && !helperInstalled() {
             print(L("提示：未安装提权助手，系统级防睡眠（电池 / 合盖）不可用。"))
             print(L("      本次按 Level 1 开启——仅在接电源时有效。"))
-            print(L("      一键安装：`blankscreen nosleep setup`（会弹系统密码框）"))
+            print(L("      一键安装：`lidkeep nosleep setup`（会弹系统密码框）"))
             wantSystem = false
         }
         if let (pid, info) = spawnNosleepDaemon(wantSystem: wantSystem, timeout: nsTimeout) {
@@ -1880,7 +1948,7 @@ case "nosleep":
             let b = batteryStatus()
             print((L("  电源: ") + "\(b.onBattery ? (L("电池 ") + "\(b.percent)" + "%") : L("电源适配器"))"))
             if let t = nsTimeout { print((L("  时长: ") + "\(Int(t))" + L(" 秒后自动停止"))) }
-            print(L("  关闭: blankscreen nosleep off"))
+            print(L("  关闭: lidkeep nosleep off"))
         } else {
             print((L("已启动但未确认，请查看 ") + "\(logPath)"))
             exit(1)
@@ -1888,7 +1956,7 @@ case "nosleep":
 
     case "setup":
         // 一键到位：装助手 → 开关屏联动 → 立即开启系统级防睡眠。每一步幂等，可重复执行。
-        print(L("BlankScreen 一键防睡眠"))
+        print(L("LidKeep 一键防睡眠"))
         if helperInstalled(), !helperOutdated() {
             print(L("① 提权助手已安装，跳过"))
         } else {
@@ -1937,7 +2005,7 @@ case "nosleep":
                 }
             }
         }
-        print(L("✅ 一键配置完成。查看状态: blankscreen nosleep status"))
+        print(L("✅ 一键配置完成。查看状态: lidkeep nosleep status"))
 
     case "off":
         // 无论守护是否在跑，「off」都表达「不再需要防睡眠」——持久标志必须一起清
@@ -1983,7 +2051,7 @@ case "nosleep":
             if let app = thirdPartySleepHolder() {
                 print((L("  ℹ️ 系统级开关由远控软件 ") + "\(app)" + L(" 持有（保持远程可用），与本程序共存，无需处理")))
             } else {
-                print(L("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `blankscreen nosleep off` 复位"))
+                print(L("  ⚠️ 检测到残留：守护进程不在，但系统级开关仍开启 —— 执行 `lidkeep nosleep off` 复位"))
             }
         }
 
@@ -2017,7 +2085,7 @@ case "nosleep":
                 print(L("⚠️ 助手安装后校验未通过（缺少持有者记账字段），安装可能未真正生效，请重新执行"))
                 exit(1)
             }
-            if !systemSleepDisabled() { print(L("当前系统级防睡眠: 关闭（用 `blankscreen nosleep on --system` 开启）")) }
+            if !systemSleepDisabled() { print(L("当前系统级防睡眠: 关闭（用 `lidkeep nosleep on --system` 开启）")) }
         }
         exit(ok ? 0 : 1)
 
@@ -2036,8 +2104,8 @@ case "nosleep":
         let dir = args.count > 3 ? args[3] : "."
         try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         do {
-            try helperScript.write(toFile: dir + "/com.blankscreen.pmset", atomically: true, encoding: .utf8)
-            try resetPlist.write(toFile: dir + "/com.blankscreen.nosleep.reset.plist", atomically: true, encoding: .utf8)
+            try helperScript.write(toFile: dir + "/com.lidkeep.pmset", atomically: true, encoding: .utf8)
+            try resetPlist.write(toFile: dir + "/com.lidkeep.nosleep.reset.plist", atomically: true, encoding: .utf8)
             print((L("已写出资产到 ") + "\(dir)"))
         } catch { print((L("写出失败: ") + "\(error)")); exit(1) }
 
@@ -2045,7 +2113,7 @@ case "nosleep":
         let nosleepHelp: String
         if L10n.isEN {
             nosleepHelp = """
-            Usage: blankscreen nosleep <subcommand>
+            Usage: lidkeep nosleep <subcommand>
               setup                         All-in-one: install helper + link to blanking + start anti-sleep
               on [--system] [--timeout S]   Enable anti-sleep (--system covers battery and closed lid; needs the helper)
               off                           Disable anti-sleep and reset the system-level setting
@@ -2055,7 +2123,7 @@ case "nosleep":
             """
         } else {
             nosleepHelp = """
-            用法: blankscreen nosleep <子命令>
+            用法: lidkeep nosleep <子命令>
               setup                         一键到位：装助手 + 开关屏联动 + 立即防睡眠
               on [--system] [--timeout 秒]   开启防睡眠（--system 覆盖电池与合盖，需先装助手）
               off                           关闭防睡眠，并复位系统级设置
@@ -2132,7 +2200,7 @@ case "config":
     // 存下来只会让热键静默失效（与菜单栏 App 的约束保持一致）。
     if args.count > 2 && c.modFlags == 0 {
         print(L("错误：全局热键必须包含至少一个修饰键，否则系统无法注册（会静默失效）。"))
-        print(L("示例: blankscreen config --mods cmd,shift --key 0"))
+        print(L("示例: lidkeep config --mods cmd,shift --key 0"))
         exit(1)
     }
     if args.count > 2 { saveConfig(c); print((L("配置已保存: ") + "\(configFile)")) }
@@ -2148,7 +2216,7 @@ case "config":
     print((L("  关屏联动防睡眠: ") + "\(c.autoNosleep ? L("开（黑屏期间阻止系统睡眠，恢复显示时自动复位）") : L("关"))"))
     let langName = c.lang == "auto" ? L("跟随系统") : (c.lang == "zh" ? L("中文") : L("英文"))
     print((L("  界面语言: ") + "\(langName)" + L("（--lang auto/zh/en）")))
-    print(L("  修改: blankscreen config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep"))
+    print(L("  修改: lidkeep config --key 11 --mods ctrl,alt,cmd --timeout 43200 --battery 20 --restore original --auto-nosleep"))
 
 case "off":
     if let pid = servicePid() {                      // 常驻模式：命令文件 + 信号双通道
@@ -2162,7 +2230,7 @@ case "off":
             exit(1)
         }
         print(ok
-              ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）恢复: 热键或 blankscreen on"))
+              ? (L("已进入黑屏（常驻服务 pid=") + "\(pid)" + L("）恢复: 热键或 lidkeep on"))
               : (L("已发送进入黑屏指令（3s 内未确认，请查看 ") + "\(logPath)" + L("）")))
         exit(0)
     }
@@ -2202,7 +2270,7 @@ case "status":
     print((L("电源: ") + "\(battText)" + L("，电量下限 ") + "\(cfg.batteryFloor > 0 ? "\(cfg.batteryFloor)%" : L("不限"))"))
 
 case "version":
-    print("blankscreen \(BS_VERSION) (\(BS_COMMIT))")
+    print("lidkeep \(LK_VERSION) (\(LK_COMMIT))")
     print("  macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
     print((L("  二进制: ") + "\(exePath)"))
     print((L("  状态目录: ") + "\(base)"))
@@ -2264,29 +2332,29 @@ default:
     let helpBody: String
     if L10n.isEN {
         helpBody = """
-        blankscreen — turn the display off without putting the Mac to sleep.
+        lidkeep — turn the display off without putting the Mac to sleep.
 
-          Recommended: the menu bar app (BlankScreenBar.app), with a zero-permission hotkey. See the README.
+          Recommended: the menu bar app (LidKeep.app), with a zero-permission hotkey. See the README.
 
         CLI usage:
-          blankscreen service install             Install the resident service (launches at login, hotkey works)
-          blankscreen service uninstall           Remove the resident service
-          blankscreen off / on / toggle           Blank / restore / toggle
-          blankscreen status                      Show state (including power source and battery)
-          blankscreen doctor                      Full self-check: blanking, display control, processes, leftovers
-          blankscreen version                     Print the version
-          blankscreen config --key 11             View or change the hotkey, timeout, battery floor and interface language
-          blankscreen bright [0.0-1.0]            Read or write brightness directly
+          lidkeep service install             Install the resident service (launches at login, hotkey works)
+          lidkeep service uninstall           Remove the resident service
+          lidkeep off / on / toggle           Blank / restore / toggle
+          lidkeep status                      Show state (including power source and battery)
+          lidkeep doctor                      Full self-check: blanking, display control, processes, leftovers
+          lidkeep version                     Print the version
+          lidkeep config --key 11             View or change the hotkey, timeout, battery floor and interface language
+          lidkeep bright [0.0-1.0]            Read or write brightness directly
 
-          Without the resident service: blankscreen off [--timeout SECONDS] [--no-timeout]
+          Without the resident service: lidkeep off [--timeout SECONDS] [--no-timeout]
 
         Anti-sleep (prevents system sleep; independent of blanking):
-          blankscreen nosleep on                  Enable (process level: AC power only)
-          blankscreen nosleep on --system         Enable (system level: covers battery and closed lid; needs the helper)
-          blankscreen nosleep on --timeout 3600   Stop automatically after a duration
-          blankscreen nosleep off / status        Disable / show level, battery and helper state
-          blankscreen nosleep install-helper      Install the privileged helper (one system password prompt)
-          blankscreen nosleep uninstall-helper    Remove the helper and reset system sleep settings
+          lidkeep nosleep on                  Enable (process level: AC power only)
+          lidkeep nosleep on --system         Enable (system level: covers battery and closed lid; needs the helper)
+          lidkeep nosleep on --timeout 3600   Stop automatically after a duration
+          lidkeep nosleep off / status        Disable / show level, battery and helper state
+          lidkeep nosleep install-helper      Install the privileged helper (one system password prompt)
+          lidkeep nosleep uninstall-helper    Remove the helper and reset system sleep settings
 
         Why the system level needs a helper: per its man page, caffeinate -s only works on AC power,
         so battery and closed-lid cases need pmset disablesleep, which requires root.
@@ -2296,36 +2364,36 @@ default:
         display off automatically (external displays are untouched); brightness is restored when the lid
         opens, and also when the daemon stops — never leaving a black screen behind.
 
-        Default hotkey: ⌃⌥⌘B (B = keyCode 11). Change it: blankscreen config --key 11 --mods ctrl,alt,cmd
+        Default hotkey: ⌃⌥⌘B (B = keyCode 11). Change it: lidkeep config --key 11 --mods ctrl,alt,cmd
         Hotkeys use the system-level Carbon path and need no permissions; if another app owns the combo it is logged.
-        Without a hotkey you can still use: blankscreen on (including over SSH) / one-shot mode with a 12 h fallback
+        Without a hotkey you can still use: lidkeep on (including over SSH) / one-shot mode with a 12 h fallback
         Battery guard: blanking is refused below 20% on battery, and restored if it drops below while blanked (disable: config --battery 0)
         """
     } else {
         helpBody = """
-        blankscreen —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
+        lidkeep —— 关屏但不睡眠（显示器熄灭，系统保持唤醒，远程可正常操控）
 
-          推荐方式：菜单栏 App（BlankScreenBar.app），热键零授权。见项目 README。
+          推荐方式：菜单栏 App（LidKeep.app），热键零授权。见项目 README。
 
         CLI 用法:
-          blankscreen service install            安装常驻服务（开机自启，热键直接开关）
-          blankscreen service uninstall          卸载常驻服务
-          blankscreen off / on / toggle          进入 / 退出 / 切换黑屏
-          blankscreen status                     查看状态（含电源与电量）
-          blankscreen doctor                     综合自检：关屏能力、显示器可控性、进程、残留
-          blankscreen version                    查看版本
-          blankscreen config --key 11            查看/修改热键、超时、电量下限、界面语言
-          blankscreen bright [0.0-1.0]           直接读写亮度
+          lidkeep service install            安装常驻服务（开机自启，热键直接开关）
+          lidkeep service uninstall          卸载常驻服务
+          lidkeep off / on / toggle          进入 / 退出 / 切换黑屏
+          lidkeep status                     查看状态（含电源与电量）
+          lidkeep doctor                     综合自检：关屏能力、显示器可控性、进程、残留
+          lidkeep version                    查看版本
+          lidkeep config --key 11            查看/修改热键、超时、电量下限、界面语言
+          lidkeep bright [0.0-1.0]           直接读写亮度
 
-          不用常驻服务时: blankscreen off [--timeout 秒] [--no-timeout]
+          不用常驻服务时: lidkeep off [--timeout 秒] [--no-timeout]
 
         防睡眠（阻止系统睡眠，与关屏相互独立）:
-          blankscreen nosleep on                 开启（进程级：仅在接电源时有效）
-          blankscreen nosleep on --system        开启（系统级：覆盖电池供电与合盖，需助手）
-          blankscreen nosleep on --timeout 3600  指定时长后自动停止
-          blankscreen nosleep off / status       关闭 / 查看层级、电量、助手状态
-          blankscreen nosleep install-helper     安装提权助手（弹系统密码框）
-          blankscreen nosleep uninstall-helper   卸载助手并复位系统睡眠设置
+          lidkeep nosleep on                 开启（进程级：仅在接电源时有效）
+          lidkeep nosleep on --system        开启（系统级：覆盖电池供电与合盖，需助手）
+          lidkeep nosleep on --timeout 3600  指定时长后自动停止
+          lidkeep nosleep off / status       关闭 / 查看层级、电量、助手状态
+          lidkeep nosleep install-helper     安装提权助手（弹系统密码框）
+          lidkeep nosleep uninstall-helper   卸载助手并复位系统睡眠设置
 
         为什么系统级需要助手: caffeinate -s 的断言按 man page 明写「仅 AC 电源有效」，
         所以电池供电与合盖这两种场景，进程级断言无解，只能用 pmset disablesleep（需 root）。
@@ -2334,9 +2402,9 @@ default:
         合盖熄屏: 防睡眠运行期间，守护进程经 SMC 检测合盖并自动熄灭内屏（外接屏不受
         影响），开盖自动恢复亮度；守护停止时也会恢复，不留黑屏残局。
 
-        默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: blankscreen config --key 11 --mods ctrl,alt,cmd
+        默认热键: ⌃⌥⌘B (B=keyCode 11)，修改: lidkeep config --key 11 --mods ctrl,alt,cmd
         热键走系统级全局热键（Carbon），不需要任何授权；若组合被其他 App 占用会写入日志。
-        未注册热键时仍可用: blankscreen on（含远程 SSH）/ 一次性模式 12 小时超时兜底
+        未注册热键时仍可用: lidkeep on（含远程 SSH）/ 一次性模式 12 小时超时兜底
         电量保护: 默认低于 20% 且使用电池时拒绝关屏，黑屏中跌破则自动恢复（config --battery 0 关闭）
         """
     }
