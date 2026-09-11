@@ -10,7 +10,7 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Chinese: [README.zh-CN.md](README.zh-CN.md)
+中文简介 [README.zh-CN.md](README.zh-CN.md)
 
 ```
 $ lidkeep off      # screen goes black, system keeps running
