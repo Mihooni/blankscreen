@@ -10,7 +10,7 @@ The screen goes pitch black; the machine keeps working. Remote desktop stays con
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-中文简介 [README.zh-CN.md](README.zh-CN.md)
+Chinese: [README.zh-CN.md](README.zh-CN.md)
 
 ```
 $ lidkeep off      # screen goes black, system keeps running
@@ -62,6 +62,13 @@ The display never sleeps, so the framebuffer keeps rendering and a remote viewer
 The lid mode runs on its own daemon, so it survives an app restart; the two display modes are held by the app itself.
 
 ## Up and running in 30 seconds
+
+```bash
+brew install --cask mihooni/tap/lidkeep
+xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # one-time, while unsigned
+```
+
+Or, by hand:
 
 1. Download `LidKeep-<version>.dmg` from [Releases](../../releases/latest)
 2. Open it and drag the app into Applications
@@ -126,7 +133,18 @@ The config accepts `auto` (follow the system, default) / `zh` / `en`; the enviro
 
 ## Install
 
-**Option A — installer (recommended).** Download `LidKeep-<version>.pkg` from
+**Option A — Homebrew.** One command, and the easiest way to stay up to date:
+
+```bash
+brew install --cask mihooni/tap/lidkeep
+xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # needed today, see below
+```
+
+The tap lives at [Mihooni/homebrew-tap](https://github.com/Mihooni/homebrew-tap).
+The second line is not optional — see
+[Gatekeeper and unsigned builds](#gatekeeper-and-unsigned-builds).
+
+**Option B — installer.** Download `LidKeep-<version>.pkg` from
 [Releases](../../releases/latest) and double-click it. One step, both pieces installed:
 
 | Installed to | Item |
@@ -134,16 +152,18 @@ The config accepts `auto` (follow the system, default) / `zh` / `en`; the enviro
 | `/Applications/LidKeep.app` | menu bar app |
 | `/usr/local/bin/lidkeep` | CLI |
 
-The installer also clears the Gatekeeper quarantine flag and launches the app for you,
-so there is nothing to do by hand.
+The installer clears the **app's** quarantine flag and launches it for you. Be aware of
+a second, earlier gate: the `.pkg` itself is not signed with a paid certificate, so if
+macOS refuses to open it ("unidentified developer"), right-click the `.pkg` → **Open**
+and confirm once. That is the only manual step, and only on the first install.
 
-**Option A2 — DMG drag-and-drop.** Download `LidKeep-<version>.dmg` from
+**Option C — DMG drag-and-drop.** Download `LidKeep-<version>.dmg` from
 [Releases](../../releases/latest), open it, and drag the app into Applications.
 Double-click `Install Command-Line Tool.command` inside the image to also install the CLI
 (one GUI password prompt). If Gatekeeper blocks the first launch, right-click
 the app → **Open**.
 
-**Option B — build from source** (needs Xcode Command Line Tools):
+**Option D — build from source** (needs Xcode Command Line Tools):
 
 ```bash
 git clone https://github.com/Mihooni/lidkeep.git
@@ -153,7 +173,7 @@ cd lidkeep
 
 `./install.sh --cli-only` skips the menu bar app. `make pkg` builds the same installer locally.
 
-**Option C — download a prebuilt zip** from [Releases](../../releases/latest), then:
+**Option E — download a prebuilt zip** from [Releases](../../releases/latest), then:
 
 ```bash
 xattr -dr com.apple.quarantine LidKeep.app   # unsigned build: clear Gatekeeper flag
@@ -161,11 +181,56 @@ cp -R LidKeep.app /Applications/
 # Apple Silicon: sudo cp lidkeep /opt/homebrew/bin/   |   Intel: sudo cp lidkeep /usr/local/bin/
 ```
 
-> **Not signed with a paid developer certificate.** macOS may refuse to open the
-> downloaded `.pkg` ("unidentified developer"). If that happens, right-click the
-> `.pkg` → **Open**, then confirm. Same for the app on first launch — though the
-> installer already clears its quarantine flag, so the app should open normally
-> right after installing.
+### Gatekeeper and unsigned builds
+
+This is the one rough edge, and it is worth understanding before you install.
+
+Releases are signed **ad-hoc, not notarized** (there is no paid Apple Developer
+certificate behind this project), so Gatekeeper treats a downloaded copy as untrusted.
+Measured on macOS 26:
+
+| Path | What Gatekeeper does |
+|---|---|
+| Direct download (`.pkg` / `.dmg` / zip) | `spctl` assesses the installer **and** the app as `rejected` |
+| `brew install --cask` | Homebrew applies the quarantine attribute itself — the app is **also rejected** |
+| Opening a quarantined copy | macOS refuses, and **may move the app straight to the Trash** |
+
+Homebrew cannot help here: `--no-quarantine` no longer exists in Homebrew 6, and a cask
+cannot waive quarantine on the user's behalf. Every path above therefore needs one manual
+step, once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/LidKeep.app
+```
+
+After a manual `.dmg`/`.pkg` download you can instead right-click it → **Open** and
+confirm once.
+
+**The real fix is notarization** — Developer ID signing plus a notarization ticket. Once
+that lands, every path above becomes a plain double-click, and it is the top priority for
+the next release. In the meantime each release publishes `SHA256SUMS` and GitHub
+build-provenance attestations, so you can verify that what you downloaded came from this
+repository.
+
+### Downloading from mainland China
+
+`github.com` release assets are often unreachable from mainland China — measured at
+**0 bytes in 10 seconds**, while `api.github.com` and `raw.githubusercontent.com` stay
+fine. That is a CDN-level block, not a problem with this project.
+
+Prefix a release URL with `https://gh-proxy.com/` to route the download through a
+mirror. This was verified byte-identical to the official artifact (matching SHA-256,
+full length) at roughly **173 KB/s**:
+
+```bash
+V=2.2.0
+curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
+shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
+```
+
+`gh-proxy.com` is a third-party accelerator, not something this project controls — it can
+change or disappear. Always check the hash against `SHA256SUMS` before installing, and
+prefer the official URL whenever you can reach it.
 
 ### Upgrading from an older release
 
