@@ -46,10 +46,18 @@ The display never sleeps, so the framebuffer keeps rendering and a remote viewer
 | Menu item | What it solves | How to use it |
 |---|---|---|
 | **Turn Display Off** | Screen goes black instantly, machine keeps running | Click it, or press ⌃⌥⌘B |
-| **Stay Awake While Blanked** | The system doesn't follow the screen into sleep | Tick once; applies to every blackout after that |
-| **Stay Awake with Lid Closed** | Built-in panel turns off on lid close, machine runs for hours | Tick once; restored automatically after app or system restarts |
+| **Power mode ▸** | Everything else | Pick one of the four below; it persists across restarts |
 
-They never interfere with each other: the lid daemon and the blackout-linked anti-sleep are separate entries in an internal ledger, so turning one off leaves the other running.
+**Power mode** is exclusive — choosing one switches the others off, so you never have to work out which boxes can be ticked together. Each option states its own cost:
+
+| Mode | What happens | Cost |
+|---|---|---|
+| **Off** | Display and Mac both sleep normally | none |
+| **Stay awake, display may sleep** | Display sleeps as usual, the Mac keeps running | easy on battery |
+| **Keep display on** | Display never sleeps on its own | uses more power |
+| **Run with lid closed** | Keeps running with the lid shut, built-in panel off, for hours | needs the privileged helper; plug in if you can |
+
+The lid mode runs on its own daemon, so it survives an app restart; the two display modes are held by the app itself.
 
 ## Up and running in 30 seconds
 
@@ -171,9 +179,8 @@ gh attestation verify blankscreen-macos.zip -R Mihooni/blankscreen   # built by 
 **Menu bar app** — click ☀ / 🌙 in the menu bar; the three core functions are named in plain words:
 
 - **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
-- **Stay Awake While Blanked** — while the screen is off, keep the system awake; released automatically on restore
-- **Stay Awake with Lid Closed (long-running)** — keep running with the lid closed, restored after a reboot (see [anti-sleep](#anti-sleep-closed-lid--battery--headless))
-- **Install Privileged Helper…** (first run) — extends the two above to battery and closed lid (one password prompt)
+- **Power mode ▸** — four exclusive choices: Off / Stay awake, display may sleep / Keep display on / Run with lid closed
+- **Install Privileged Helper…** (first run) — extends lid-closed mode to battery and closed lid (one password prompt)
 - **Settings…** — hotkey combo + key, fallback timeout, battery guard, restore-brightness policy, launch at login
 - **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
 - **Open Log**

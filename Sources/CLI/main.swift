@@ -128,8 +128,13 @@ struct Config: Codable {
     // 关掉它则合盖只保持机器运转、内屏维持原亮度（熄屏异常时的退路）。
     var lidBlackout: Bool = true
     var lang: String = "auto"                             // 界面语言：auto=跟随系统 / zh / en
+    var keepDisplayOn: Bool = false                       // 保持屏幕常亮：阻止显示器自动睡眠（caffeinate -d）
+    /// 配置结构版本。旧配置没有这个字段 → 读出 0 → 走 migrate() 补齐语义。
+    /// 借鉴 WorkBuddy 的 parsePowerSaveBlockerMode：字段语义一旦变过，老配置必须能被纠正，
+    /// 而不是沿用写盘时的旧含义。
+    var schemaVersion: Int = 0
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -140,16 +145,53 @@ struct Config: Codable {
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
+        lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
         lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
+        keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+    }
+    /// 逐版本升级旧配置。返回 true 表示有改动、需要回写。
+    /// 只由 loadConfig() 调用一次：init 里跑过的话，loadConfig 再跑会因版本已最新而无从判断是否该回写。
+    @discardableResult
+    mutating func migrate() -> Bool {
+        guard schemaVersion < configSchemaVersion else { return false }
+        if schemaVersion < 1 {
+            // v0 → v1：合盖熄屏从「隐含在 lidAwake 里」拆成独立开关。
+            // 之前开着合盖模式的用户，行为必须维持不变（合盖即熄屏）。
+            if lidAwake { lidBlackout = true }
+            schemaVersion = 1
+        }
+        return true
     }
 }
+
+/// 配置结构的当前版本。新增字段若带安全默认值（decodeIfPresent ?? x）就不必 bump；
+/// 只有「同一字段换了语义」或「需要按旧值推导新值」时才 bump 并在 migrate() 里补一步。
+let configSchemaVersion = 1
+
 func loadConfig() -> Config {
     if let d = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
-       let c = try? JSONDecoder().decode(Config.self, from: d) { return c }
-    return Config()
+       var c = try? JSONDecoder().decode(Config.self, from: d) {
+        if c.migrate() { saveConfig(c) }     // 迁移结果落盘，避免每次启动重复迁移
+        return c
+    }
+    var c = Config(); c.schemaVersion = configSchemaVersion
+    return c
 }
+
+/// 原子写：先写同目录临时文件再 rename。
+/// 菜单栏 App 与 CLI 守护会写同一个 config.json，直接覆盖会在崩溃/并发瞬间留下半截 JSON，
+/// 下一次读出空配置（热键回到默认、模式全关）——这类故障极难复现，必须一开始就排除。
 func saveConfig(_ c: Config) {
-    if let d = try? JSONEncoder().encode(c) { try? d.write(to: URL(fileURLWithPath: configFile)) }
+    guard let d = try? JSONEncoder().encode(c) else { return }
+    let tmp = configFile + ".tmp.\(getpid())"
+    do {
+        try d.write(to: URL(fileURLWithPath: tmp))
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmp)
+        if rename(tmp, configFile) != 0 { try? fm.removeItem(atPath: tmp) }
+    } catch {
+        try? fm.removeItem(atPath: tmp)
+    }
 }
 
 // MARK: - 亮度读写 (DisplayServices 私有框架)
@@ -1473,6 +1515,62 @@ func orphanCaffeinate() -> [Int32] {
 
 /// 综合自检：把「能不能关屏、谁在跑、有没有残留」一次性摆出来。
 /// 退出码 0 = 无致命问题，1 = 存在必须修复的问题（供脚本与 CI 使用）。
+struct PowerAssertion {
+    var kind: String      // 断言类型，如 NoIdleSleepAssertion
+    var pid: Int32
+    var name: String      // 持有者自报的断言名
+    var elapsed: String   // 已持有时长
+    var ours: Bool
+}
+
+/// 取正则捕获组。pmset 输出没有稳定字段数，只能按模式抓。
+func capture(_ s: String, _ pattern: String, group: Int = 1) -> String? {
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let ns = s as NSString
+    guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
+          m.numberOfRanges > group, m.range(at: group).location != NSNotFound else { return nil }
+    return ns.substring(with: m.range(at: group))
+}
+
+/// 断言持有者是不是我们拉起来的。
+///
+/// caffeinate 的断言名恒为 "caffeinate command-line tool"，与任何第三方 caffeinate
+/// 完全无法区分（正如 WorkBuddy 与小米互联服务的断言都叫 "Electron"）。因此改从
+/// 亲缘关系判定：父进程是 blankscreen 家族即视为本程序持有。
+func assertionOwnerIsOurs(_ pid: Int32) -> Bool {
+    guard let pps = runCapture("/bin/ps", ["-o", "ppid=", "-p", String(pid)]),
+          let ppid = Int32(pps.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+    let cmd = runCapture("/bin/ps", ["-o", "command=", "-p", String(ppid)]) ?? ""
+    return cmd.contains("blankscreen") || cmd.contains("BlankScreenBar")
+}
+
+/// 当前系统里所有「阻止睡眠」的断言持有者 —— 用户问「谁不让我的 Mac 睡」时的唯一权威答案。
+func powerAssertions() -> [PowerAssertion] {
+    guard let out = runCapture("/usr/bin/pmset", ["-g", "assertions"]) else { return [] }
+    var res: [PowerAssertion] = []
+    for rawLine in out.split(separator: "\n") {
+        let s = String(rawLine)
+        // 行形如: pid 32344(caffeinate): [0x0000...] 08:04:53 PreventUserIdleSystemSleep named: "..."
+        //        时长字段可选，因此不能按下标取，只能扫 token。
+        guard let pidStr = capture(s, #"pid (\d+)\("#), let pid = Int32(pidStr),
+              let mark = s.range(of: "]") else { continue }
+        let tail = String(s[mark.upperBound...])
+        let toks = tail.split(whereSeparator: { $0 == " " || $0 == "\t" }).filter { !$0.isEmpty }
+        var elapsed = ""
+        var kind = ""
+        for t in toks {
+            if t.contains(":") && t.allSatisfy({ $0.isNumber || $0 == ":" }) && elapsed.isEmpty {
+                elapsed = String(t); continue
+            }
+            if kind.isEmpty, t.allSatisfy({ $0.isLetter || $0.isNumber }) { kind = String(t) }
+        }
+        guard !kind.isEmpty else { continue }
+        let name = capture(s, ##"named: "(.*)""##) ?? ""
+        res.append(PowerAssertion(kind: kind, pid: pid, name: name, elapsed: elapsed,
+                                  ours: assertionOwnerIsOurs(pid)))
+    }
+    return res
+}
 func runDoctor() -> Int32 {
     var errors: [String] = []
     var warns: [String] = []
@@ -1566,6 +1664,35 @@ func runDoctor() -> Int32 {
     } else {
         print(L("  ⚠️  提权助手未安装：防睡眠仅在接电源时有效，电池供电与合盖仍会睡眠"))
         print(L("     → 一键安装：blankscreen nosleep setup"))
+    }
+
+    print(L("\n【电源断言】"))
+    print(L("  下面列出此刻真正在阻止 Mac 睡眠的持有者（pmset -g assertions）。"))
+    let asserts = powerAssertions()
+    let mine = asserts.filter { $0.ours }
+    let others = asserts.filter { !$0.ours }
+    if mine.isEmpty {
+        print(L("  · 本程序：未持有断言"))
+    } else {
+        for a in mine {
+            print((L("  ✅ 本程序持有 pid=") + "\(a.pid)" + " " + a.kind
+                   + (a.elapsed.isEmpty ? "" : (L("（已 ") + a.elapsed + L("）")))))
+        }
+    }
+    if others.isEmpty {
+        print(L("  ✅ 无第三方持有者"))
+    } else {
+        for a in others {
+            let who = a.name.isEmpty ? L("（未署名）") : ("\"" + a.name + "\"")
+            print((L("  ℹ️ 其他持有者 pid=") + "\(a.pid)" + " " + who + " — " + a.kind
+                   + (a.elapsed.isEmpty ? "" : (L("（已 ") + a.elapsed + L("）")))))
+        }
+        print(L("     → 这些与本程序无关；若要让 Mac 恢复自动睡眠，需到对应应用里关闭。"))
+    }
+    // 断言是「真实状态」，配置只是「意图」：两者不符才是最该报出来的问题
+    if (c.autoNosleep || c.lidAwake) && mine.isEmpty && !systemSleepDisabled() {
+        warns.append(L("防睡眠未生效"))
+        print(L("  ⚠️  配置要求防睡眠，但当前没有任何断言在生效中（黑屏时才会起断言）"))
     }
 
     print(L("\n【合盖检测】"))

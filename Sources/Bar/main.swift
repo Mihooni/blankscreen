@@ -96,8 +96,10 @@ struct Config: Codable {
     var lidAwake: Bool = false                           // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
     var lidBlackout: Bool = true                         // 合盖时熄灭内屏（与 lidAwake 分离的独立开关）
     var lang: String = "auto"                            // 界面语言：auto=跟随系统 / zh / en
+    var keepDisplayOn: Bool = false                      // 保持屏幕常亮：阻止显示器自动睡眠（caffeinate -d）
+    var schemaVersion: Int = 0                           // 见 CLI 同名注释：旧配置读出 0，交由 migrate() 升级
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -110,22 +112,134 @@ struct Config: Codable {
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
         lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
         lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
+        keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+    }
+    @discardableResult
+    mutating func migrate() -> Bool {
+        guard schemaVersion < configSchemaVersion else { return false }
+        if schemaVersion < 1 {
+            if lidAwake { lidBlackout = true }   // 老用户开着合盖模式 → 合盖即熄屏，行为不变
+            schemaVersion = 1
+        }
+        return true
+    }
+}
+
+let configSchemaVersion = 1
+
+// MARK: - 运行模式（互斥）
+//
+// 借鉴 WorkBuddy 的单一 mode 枚举：与其让用户自己组合布尔开关，不如给几个互斥入口。
+// 但底层仍保留 autoNosleep / keepDisplayOn / lidAwake 三个布尔作为真值——合盖模式需要
+// root 且语义独立，强行合成一个枚举会丢能力。模式只是这三个布尔的**投影**，每次由布尔
+// 推导而非单独持久化，因此不存在「两份真值不同步」的风险。
+enum PowerMode: String, CaseIterable {
+    case off                  // 不额外干预
+    case allowDisplaySleep    // 熄屏后保持唤醒：显示器照常熄，系统不睡
+    case keepDisplayOn        // 保持屏幕常亮：显示器不熄，系统不睡
+    case lidAwake             // 合盖运行：长期模式，由独立守护持有
+
+    var title: String {
+        switch self {
+        case .off:               return L("关闭")
+        case .allowDisplaySleep: return L("熄屏后保持唤醒")
+        case .keepDisplayOn:     return L("保持屏幕常亮")
+        case .lidAwake:          return L("合盖运行")
+        }
+    }
+    /// 即时代价。学 WorkBuddy：每个选项配一句后果，用户不必读文档就知道代价。
+    var cost: String {
+        switch self {
+        case .off:               return L("屏幕与系统都按系统设置正常睡眠")
+        case .allowDisplaySleep: return L("屏幕照常熄灭，机器继续运行，较省电")
+        case .keepDisplayOn:     return L("屏幕不会自动熄灭，机器持续运行，较耗电")
+        case .lidAwake:          return L("合盖也持续运行，内屏熄灭，建议接电源")
+        }
+    }
+}
+
+func currentPowerMode(_ c: Config) -> PowerMode {
+    if c.lidAwake { return .lidAwake }
+    if c.keepDisplayOn { return .keepDisplayOn }
+    if c.autoNosleep { return .allowDisplaySleep }
+    return .off
+}
+
+/// 启动时把多个同时为真的标志收敛到单一模式。
+/// 历史配置里 autoNosleep 与 lidAwake 可以并存，那样菜单只能显示其中一个，
+/// 另一个却在后台生效——正是「UI 说一套、机器做一套」。这里按优先级收敛。
+func normalizePowerModes() {
+    var c = loadConfig()
+    let m = currentPowerMode(c)
+    let wantNosleep = (m == .allowDisplaySleep)
+    let wantKeep    = (m == .keepDisplayOn)
+    let wantLid     = (m == .lidAwake)
+    if c.autoNosleep != wantNosleep || c.keepDisplayOn != wantKeep || c.lidAwake != wantLid {
+        blog("bar: 运行模式归一化为 \(m.rawValue)（原 autoNosleep=\(c.autoNosleep) keepDisplayOn=\(c.keepDisplayOn) lidAwake=\(c.lidAwake)）")
+        c.autoNosleep = wantNosleep; c.keepDisplayOn = wantKeep; c.lidAwake = wantLid
+        saveConfig(c)
+    }
+}
+
+/// 应用互斥运行模式。菜单与设置面板共用这一处，避免两边逻辑漂移。
+/// 返回 false = 前置条件不满足（缺提权助手 / 电量低于下限），此时配置保持原样。
+@discardableResult
+func applyPowerMode(_ m: PowerMode) -> Bool {
+    let ctl = ScreenController.shared
+    let wantLid = (m == .lidAwake)
+    if wantLid != ctl.lidOn {
+        if wantLid && !ctl.helperInstalled() {
+            notifyUser(L("「合盖运行」需要提权助手：请先点击设置里的「安装提权助手」。"))
+            return false
+        }
+        guard ctl.setLidAwake(wantLid) else {
+            notifyUser(L("合盖运行模式切换失败：需要提权助手，且电量需高于下限。详见「打开日志」。"))
+            return false
+        }
+    }
+    var c = loadConfig()          // setLidAwake 写过配置，重读以免覆盖它的结果
+    c.autoNosleep   = (m == .allowDisplaySleep)
+    c.keepDisplayOn = (m == .keepDisplayOn)
+    c.lidAwake      = wantLid
+    saveConfig(c)
+    ctl.cfg = c
+    ctl.syncKeepDisplayOn()
+    // 切走「熄屏后保持唤醒」时，正由它拉起的黑屏防睡眠一并解除
+    if !c.autoNosleep && ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep(L("切换运行模式")) }
+    notifyUser(L("运行模式：") + m.title + L(" —— ") + m.cost)
+    return true
+}
+
+func loadConfig() -> Config {
+    if let d = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
+       var c = try? JSONDecoder().decode(Config.self, from: d) {
+        if c.migrate() { saveConfig(c) }
+        return c
+    }
+    var c = Config(); c.schemaVersion = configSchemaVersion
+    return c
+}
+
+/// 原子写：先写同目录临时文件再 rename。
+/// 菜单栏 App 与 CLI 守护写同一个 config.json，直接覆盖可能在崩溃瞬间留下半截 JSON，
+/// 下次读出空配置（热键回默认、模式全关）——这类故障极难复现，必须一开始就排除。
+func saveConfig(_ c: Config) {
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let d = try? enc.encode(c) else { return }
+    let tmp = configFile + ".tmp.\(getpid())"
+    do {
+        try d.write(to: URL(fileURLWithPath: tmp))
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmp)
+        if rename(tmp, configFile) != 0 { try? FileManager.default.removeItem(atPath: tmp) }
+    } catch {
+        try? FileManager.default.removeItem(atPath: tmp)
     }
 }
 let MOD_CTRL: UInt64  = 1 << 18
 let MOD_ALT: UInt64   = 1 << 19
 let MOD_CMD: UInt64   = 1 << 20
 let MOD_SHIFT: UInt64 = 1 << 17
-
-func loadConfig() -> Config {
-    if let d = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
-       let c = try? JSONDecoder().decode(Config.self, from: d) { return c }
-    return Config()
-}
-func saveConfig(_ c: Config) {
-    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let d = try? enc.encode(c) { try? d.write(to: URL(fileURLWithPath: configFile)) }
-}
 
 // MARK: - 键位表
 let keyItems: [(String, Int64)] = [
@@ -505,6 +619,34 @@ final class ScreenController {
         onStateChange?()
     }
 
+    // MARK: 保持屏幕常亮（-d）
+    //
+    // 与「防睡眠」是两件事：防睡眠挡的是系统睡眠，这里只挡显示器睡眠。
+    // 一个 caffeinate -d 即可，不需要 root——这正是它能作为独立模式存在的理由。
+    // 注意与主动关屏不冲突：-d 挡的是「系统自动熄屏」，用户主动把亮度归零照样生效。
+    var displayCaff: Process?
+
+    func startKeepDisplayOn() {
+        guard displayCaff == nil else { return }
+        let c = Process()
+        c.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        c.arguments = ["-d", "-w", String(ProcessInfo.processInfo.processIdentifier)]
+        try? c.run()
+        displayCaff = c
+        blog("bar: 保持屏幕常亮已开启（阻止显示器自动睡眠）")
+        onStateChange?()
+    }
+    func stopKeepDisplayOn() {
+        guard displayCaff != nil else { return }
+        displayCaff?.terminate(); displayCaff = nil
+        blog("bar: 保持屏幕常亮已关闭")
+        onStateChange?()
+    }
+    /// 按配置对齐常亮状态：启动时恢复持久设置，配置变更后重新对齐。
+    func syncKeepDisplayOn() {
+        if cfg.keepDisplayOn { startKeepDisplayOn() } else { stopKeepDisplayOn() }
+    }
+
     // MARK: 状态
     var isBlacked: Bool { fm.fileExists(atPath: stateFile) }
 
@@ -717,6 +859,11 @@ final class ScreenController {
             }
         }
 
+        // 「保持屏幕常亮」同样是持久标志：重启后按配置恢复，否则用户会以为还开着
+        normalizePowerModes()      // 多个标志同时为真时收敛到单一模式，避免显示与实际不符
+        cfg = loadConfig()
+        syncKeepDisplayOn()
+
         // 指令走命令文件：SIGUSR1/USR2 必须显式忽略（默认行为是终止进程），
         // 真正的开关动作由下方 Timer 轮询 command 文件完成
         for sig in [SIGUSR1, SIGUSR2, SIGHUP] { signal(sig, SIG_IGN) }
@@ -837,8 +984,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var timeoutPop: NSPopUpButton!
     private var batteryPop: NSPopUpButton!
     private var restorePop: NSPopUpButton!
-    private var nosleepBtn: NSButton!
-    private var lidBtn: NSButton!
+    private var modeBtns: [NSButton] = []
     private var lidBlackoutBtn: NSButton!
     private var helperLabel: NSTextField!
     private var helperBtn: NSButton!
@@ -926,16 +1072,23 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         let battTip = wrapLabel(L("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。"))
         root.addArrangedSubview(battTip)
 
-        // —— 合盖行为：黑屏与不睡眠拆成两项，各自可见可控
-        root.addArrangedSubview(section(L("合盖行为")))
-        lidBtn = NSButton(checkboxWithTitle: L("合盖后不睡眠（长期运行，重启自动恢复）"), target: self, action: #selector(onLidToggled(_:)))
-        root.addArrangedSubview(lidBtn)
+        // —— 运行模式：四选一。每个选项下面紧跟一句「即时代价」，
+        //    用户不必读文档就知道选了会怎样（借鉴 WorkBuddy 的写法）。
+        root.addArrangedSubview(section(L("运行模式")))
+        for (i, pm) in PowerMode.allCases.enumerated() {
+            let b = NSButton(radioButtonWithTitle: pm.title, target: self, action: #selector(onPowerModeSelected(_:)))
+            b.tag = i
+            b.font = .systemFont(ofSize: 13)
+            root.addArrangedSubview(b)
+            root.addArrangedSubview(indent(wrapLabel(pm.cost)))
+            modeBtns.append(b)
+        }
         lidBlackoutBtn = NSButton(checkboxWithTitle: L("合盖时熄灭内屏"), target: self, action: #selector(onLidBlackoutToggled(_:)))
         root.addArrangedSubview(lidBlackoutBtn)
         root.addArrangedSubview(wrapLabel(
-            L("开启后合盖不再休眠：内屏熄灭、机器持续运行——下载、远程访问、外接显示器照常工作。") +
-            L("「熄灭内屏」由合盖守护执行，因此需要先开启上一项；个别机型熄屏后亮度回不来时，可单独关掉它。") +
-            L("建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")))
+            L("「合盖时熄灭内屏」由合盖守护执行，因此需要先选择「合盖运行」；") +
+            L("个别机型熄屏后亮度回不来时，可单独关掉它作为退路。") +
+            L("合盖运行建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")))
 
         let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
         helperBtn = NSButton(title: L("安装提权助手…"), target: self, action: #selector(onInstallHelper(_:)))
@@ -943,11 +1096,6 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(helperRow)
         helperLabel = wrapLabel("")
         root.addArrangedSubview(helperLabel)
-
-        // —— 防睡眠
-        root.addArrangedSubview(section(L("防睡眠（阻止系统睡眠）")))
-        nosleepBtn = NSButton(checkboxWithTitle: L("息屏时不睡眠（每次息屏/关屏自动生效）"), target: self, action: #selector(onNosleepToggled(_:)))
-        root.addArrangedSubview(nosleepBtn)
 
         // —— 恢复亮度
         root.addArrangedSubview(section(L("恢复后的亮度")))
@@ -1013,6 +1161,14 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         l.widthAnchor.constraint(equalToConstant: 410).isActive = true
         return l
     }
+    /// 把说明文字缩进到与选项标题对齐（选项文字本身是从圆圈之后开始的）
+    private func indent(_ view: NSView) -> NSStackView {
+        let s = NSStackView(); s.orientation = .horizontal; s.spacing = 0
+        let pad = NSView()
+        pad.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        s.addArrangedSubview(pad); s.addArrangedSubview(view)
+        return s
+    }
     private func row(_ label: String, _ view: NSView) -> NSStackView {
         let s = NSStackView(); s.orientation = .horizontal; s.spacing = 10
         let l = NSTextField(labelWithString: label)
@@ -1042,16 +1198,19 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
         loginBtn.state = isLoginItemEnabled() ? .on : .off
         syncNosleep()
-        lidBtn.state = ctl.lidOn ? .on : .off
+        // 运行模式：由底层三个布尔推导，因此不存在「面板与真实状态不一致」
+        let mode = currentPowerMode(cfg)
+        for (i, pm) in PowerMode.allCases.enumerated() where i < modeBtns.count {
+            modeBtns[i].state = (pm == mode) ? .on : .off
+        }
         lidBlackoutBtn.state = cfg.lidBlackout ? .on : .off
         // 熄屏由合盖守护执行，守护没开时这一项无从生效——禁用，避免「勾了却没反应」
         lidBlackoutBtn.isEnabled = ctl.lidOn
         refreshPerm()
     }
 
-    /// 防睡眠与提权助手状态。助手是「系统级防睡眠」的前提，必须让用户看得见当前能力边界。
+    /// 提权助手状态。助手是「系统级防睡眠 / 合盖运行」的前提，必须让用户看得见当前能力边界。
     private func syncNosleep() {
-        nosleepBtn.state = cfg.autoNosleep ? .on : .off
         if ctl.helperInstalled() {
             helperBtn.title = L("卸载提权助手")
             // 过旧的助手缺少「多持有者记账」：关屏联动与手动防睡眠会互相踩掉对方的设置
@@ -1068,33 +1227,14 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         helperLabel.needsLayout = true
     }
 
-    @objc private func onNosleepToggled(_ sender: Any?) {
-        cfg.autoNosleep = (nosleepBtn.state == .on)
-        ctl.cfg = cfg
-        commit()
-        // 已处于黑屏时立即生效，不必等下次关屏
-        if cfg.autoNosleep && ctl.blacked { ctl.startNosleep(auto: true) }
-    }
-
-    /// 设置面板里的合盖模式开关。助手未安装时引导到下方安装按钮。
-    @objc private func onLidToggled(_ sender: Any?) {
-        let want = lidBtn.state == .on
-        if want && !ctl.helperInstalled() {
-            lidBtn.state = .off
-            let a = NSAlert()
-            a.messageText = L("「合盖后不睡眠」需要提权助手")
-            a.informativeText = L("合盖会触发系统级睡眠，只有 root 权限的 pmset 能阻止它。") +
-                L("点击下方「安装提权助手」（弹一次系统密码框）后再开启本项。")
-            a.runModal()
-            return
-        }
-        if ctl.setLidAwake(want) {
-            cfg = ctl.cfg
-            commit()
-            lidBlackoutBtn.isEnabled = want
-        } else {
-            lidBtn.state = want ? .off : .on
-        }
+    /// 选择运行模式：走 applyPowerMode 统一入口（菜单用的是同一个函数）
+    @objc private func onPowerModeSelected(_ sender: NSButton) {
+        let idx = sender.tag
+        guard idx >= 0, idx < PowerMode.allCases.count else { return }
+        let m = PowerMode.allCases[idx]
+        guard m != currentPowerMode(loadConfig()) else { return }   // 点中已选中的项不重复折腾
+        applyPowerMode(m)
+        syncFromConfig()
     }
 
     /// 「合盖时熄灭内屏」。守护在启动时读一次该开关决定要不要熄屏，
@@ -1110,7 +1250,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             guard let self else { return }
             if self.ctl.setLidAwake(true) {
                 self.cfg = self.ctl.cfg
-                self.lidBtn.state = self.ctl.lidOn ? .on : .off
+                self.syncFromConfig()
             } else {
                 self.lidBlackoutBtn.state = self.cfg.lidBlackout ? .on : .off
             }
@@ -1258,8 +1398,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
-    private var nosleepItem: NSMenuItem!
-    private var lidItem: NSMenuItem!
+    private var modeItem: NSMenuItem!
+    private var modeItems: [PowerMode: NSMenuItem] = [:]
     private var setupItem: NSMenuItem!
     private var stateItem: NSMenuItem!
     private var loginItem: NSMenuItem!
@@ -1335,15 +1475,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.target = self
         toggleItem.toolTip = L("立即熄灭屏幕，机器保持运行；再点一次（或按热键）恢复")
         m.addItem(toggleItem)
-        nosleepItem = NSMenuItem(title: L("息屏时不睡眠"), action: #selector(toggleAutoNosleep(_:)), keyEquivalent: "")
-        nosleepItem.target = self
-        nosleepItem.toolTip = L("开启后，每次息屏/关屏期间自动阻止系统睡眠，恢复显示时自动解除")
-        m.addItem(nosleepItem)
-        // 合盖模式：长期持久的「合盖也不睡」，由独立 CLI 守护持有，重启自动恢复
-        lidItem = NSMenuItem(title: L("合盖后不睡眠（长期运行）"), action: #selector(toggleLidAwake(_:)), keyEquivalent: "")
-        lidItem.target = self
-        lidItem.toolTip = L("开启后合盖也不睡眠：内屏熄灭、机器持续运行；重启电脑后自动恢复")
-        m.addItem(lidItem)
+        // 运行模式：四个互斥入口。底层仍是三个布尔真值，此处只做投影——
+        // 用户不必理解「防睡眠 / 常亮 / 合盖」能否叠加，选一个即可。
+        modeItem = NSMenuItem(title: L("运行模式"), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for pm in PowerMode.allCases {
+            let it = NSMenuItem(title: pm.title, action: #selector(selectPowerMode(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = pm.rawValue
+            sub.addItem(it)
+            modeItems[pm] = it
+        }
+        modeItem.submenu = sub
+        modeItem.toolTip = L("四选一：决定息屏/合盖时机器与屏幕的行为")
+        m.addItem(modeItem)
         // 首次使用装一次提权助手（弹系统密码框）；装好后此入口隐藏（设置面板仍可卸载）。
         setupItem = NSMenuItem(title: L("安装提权助手（首次使用）…"), action: #selector(runSetup(_:)), keyEquivalent: "")
         setupItem.target = self
@@ -1377,18 +1522,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             : (L("BlankScreen —— 快捷键 ") + "\(hotkeyText(ctl.cfg))" + L("，点击打开菜单"))
         stateItem.title = blacked ? L("● 屏幕已关闭 · 机器运行中") : L("○ 屏幕正常")
         toggleItem.title = blacked ? (L("恢复显示器  ") + "\(hotkeyText(ctl.cfg))") : (L("关闭显示器  ") + "\(hotkeyText(ctl.cfg))")
-        // ② 息屏时不睡眠：勾选 = 自动联动已开启；黑屏中额外显示当前生效层级
-        nosleepItem.state = ctl.cfg.autoNosleep ? .on : .off
+        // 运行模式：父项显示当前模式，子项打勾；黑屏中额外标注实际生效层级
+        let mode = currentPowerMode(ctl.cfg)
+        var modeTitle = L("运行模式：") + mode.title
         if blacked && ctl.nosleepOn {
-            nosleepItem.title = ctl.nosleepSystemOn
-                ? L("息屏时不睡眠（已生效 · 系统级）")
-                : L("息屏时不睡眠（已生效 · 仅接电源）")
-        } else {
-            nosleepItem.title = L("息屏时不睡眠")
+            modeTitle += ctl.nosleepSystemOn ? L("（已生效 · 系统级）") : L("（已生效 · 仅接电源）")
         }
-        // ③ 合盖后不睡眠：勾选由系统菜单的原生 ✓ 表达，不再重复加字
-        lidItem.state = ctl.lidOn ? .on : .off
-        lidItem.title = L("合盖后不睡眠（长期运行）")
+        modeItem.title = modeTitle
+        for (pm, it) in modeItems {
+            it.state = (pm == mode) ? .on : .off
+            it.toolTip = pm.cost
+        }
         setupItem.isHidden = ctl.helperInstalled()
         loginItem?.state = isLoginItemEnabled() ? .on : .off
         if hotkeyUnavailable {
@@ -1449,22 +1593,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggle(_ sender: Any?) { ctl.toggle() }
 
     /// ② 息屏时不睡眠：开关的是「自动联动」配置。已在黑屏中则立即生效/解除。
-    @objc private func toggleAutoNosleep(_ sender: Any?) {
-        var c = loadConfig()
-        c.autoNosleep.toggle()
-        saveConfig(c)
-        ctl.cfg = c
-        if c.autoNosleep {
-            if ctl.blacked { ctl.startNosleep(auto: true) }
-            notifyUser(L("已开启「息屏时不睡眠」：") +
-                (ctl.helperInstalled()
-                    ? L("每次息屏/关屏期间自动阻止系统睡眠（系统级，覆盖合盖与电池）。")
-                    : L("每次息屏/关屏期间自动阻止系统睡眠。注意：未安装提权助手时仅接电源有效，合盖仍会睡。")))
-        } else {
-            // 正在黑屏中的联动防睡眠随之解除；合盖模式（独立守护）不受影响
-            if ctl.nosleepOn && ctl.nosleepAuto { ctl.stopNosleep(L("已关闭「息屏时不睡眠」")) }
-            notifyUser(L("已关闭「息屏时不睡眠」：息屏/关屏不再阻止系统睡眠。"))
-        }
+    // MARK: 运行模式（互斥）
+    //
+    // 四个入口对应同一组底层布尔的不同组合，切一个即关掉其余——
+    // 用户不需要判断「防睡眠」和「合盖模式」能不能同时开。
+    @objc private func selectPowerMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let m = PowerMode(rawValue: raw) else { return }
+        applyPowerMode(m)
         refreshUI()
     }
 
