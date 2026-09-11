@@ -1449,6 +1449,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotkeyUnavailable = false
     private let ctl = ScreenController.shared
     private var settings: SettingsPanel?
+    // 开源项目地址（检查更新 / 关于 / 跳转共用同一来源）
+    private let repoURL = "https://github.com/Mihooni/lidkeep"
+    private let releasesURL = "https://github.com/Mihooni/lidkeep/releases"
+    private let latestAPI = "https://api.github.com/repos/Mihooni/lidkeep/releases/latest"
 
     func applicationDidFinishLaunching(_ a: Notification) {
         AppDelegate.shared = self
@@ -1548,6 +1552,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loginItem.target = self; m.addItem(loginItem)
         let log = NSMenuItem(title: L("打开日志"), action: #selector(openLog(_:)), keyEquivalent: "")
         log.target = self; m.addItem(log)
+        m.addItem(.separator())
+        let upd = NSMenuItem(title: L("检查更新…"), action: #selector(checkUpdate(_:)), keyEquivalent: "")
+        upd.target = self; m.addItem(upd)
+        let about = NSMenuItem(title: L("关于 LidKeep"), action: #selector(showAbout(_:)), keyEquivalent: "")
+        about.target = self; m.addItem(about)
+        let gh = NSMenuItem(title: L("在 GitHub 上查看"), action: #selector(openGitHub(_:)), keyEquivalent: "")
+        gh.target = self; m.addItem(gh)
         m.addItem(.separator())
         let q = NSMenuItem(title: L("退出"), action: #selector(quit(_:)), keyEquivalent: "q")
         q.target = self; m.addItem(q)
@@ -1740,6 +1751,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
     }
     @objc private func quit(_ sender: Any?) { ctl.shutdown() }
+
+    // MARK: 关于 / 检查更新 / 跳转开源仓库
+
+    /// 打开开源仓库主页
+    @objc private func openGitHub(_ sender: Any?) {
+        guard let u = URL(string: repoURL) else { return }
+        NSWorkspace.shared.open(u)
+    }
+
+    /// 软件详情：版本 / commit / 描述 / 许可证 / 仓库，并内置跳转按钮
+    @objc private func showAbout(_ sender: Any?) {
+        let a = NSAlert()
+        a.messageText = "LidKeep"
+        let lines = [
+            L("关屏但不睡眠，合盖继续运行。"),
+            "",
+            L("版本") + ": \(LK_VERSION) (\(LK_COMMIT))",
+            L("许可证") + ": MIT",
+            L("开源仓库") + ": github.com/Mihooni/lidkeep",
+        ]
+        a.informativeText = lines.joined(separator: "\n")
+        a.addButton(withTitle: L("在 GitHub 上查看"))
+        a.addButton(withTitle: L("好"))
+        if a.runModal() == .alertFirstButtonReturn {
+            openGitHub(nil)
+        }
+    }
+
+    /// 检查更新：拉取 GitHub Releases 的最新 tag，与本机版本比较
+    @objc private func checkUpdate(_ sender: Any?) {
+        guard let url = URL(string: latestAPI) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        // GitHub API 对未带 User-Agent 的请求会返回 403，必须设置
+        req.setValue("LidKeep", forHTTPHeaderField: "User-Agent")
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let err = err {
+                    self.reportUpdateFailure(message: err.localizedDescription)
+                    return
+                }
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = json["tag_name"] as? String else {
+                    self.reportUpdateFailure(message: L("无法解析更新信息"))
+                    return
+                }
+                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                if self.isVersion(latest, newerThan: LK_VERSION) {
+                    self.reportUpdateAvailable(latest: latest, html: json["html_url"] as? String)
+                } else {
+                    self.reportUpdateUpToDate()
+                }
+            }
+        }
+        task.resume()
+    }
+
+    /// 语义化版本比较：a 是否比 b 新（仅比 major.minor.patch 数字）
+    private func isVersion(_ a: String, newerThan b: String) -> Bool {
+        let pa = a.split(separator: ".").compactMap { Int($0) }
+        let pb = b.split(separator: ".").compactMap { Int($0) }
+        let n = max(pa.count, pb.count)
+        for i in 0..<n {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    private func reportUpdateUpToDate() {
+        let a = NSAlert()
+        a.messageText = L("已是最新版本")
+        a.informativeText = L("你正在使用最新版本 ") + "v\(LK_VERSION)。"
+        a.addButton(withTitle: L("好"))
+        a.runModal()
+    }
+
+    private func reportUpdateAvailable(latest: String, html: String?) {
+        let a = NSAlert()
+        a.messageText = L("发现新版本")
+        a.informativeText = L("当前版本 ") + "v\(LK_VERSION)，" + L("最新版本 ") + "v\(latest)。\n" + L("点击「打开发布页」前往下载。")
+        a.addButton(withTitle: L("打开发布页"))
+        a.addButton(withTitle: L("好"))
+        if a.runModal() == .alertFirstButtonReturn {
+            if let u = URL(string: html ?? releasesURL) { NSWorkspace.shared.open(u) }
+        }
+    }
+
+    private func reportUpdateFailure(message: String) {
+        let a = NSAlert()
+        a.messageText = L("检查更新失败")
+        a.alertStyle = .warning
+        a.informativeText = message + "\n" + L("你可以手动前往发布页查看。")
+        a.addButton(withTitle: L("打开发布页"))
+        a.addButton(withTitle: L("好"))
+        if a.runModal() == .alertFirstButtonReturn {
+            if let u = URL(string: releasesURL) { NSWorkspace.shared.open(u) }
+        }
+    }
 
     /// 热键未生效时的排查入口。刻意不弹模态对话框挡住主线程，只给提示 + 重试
     @objc private func openAuthorizeFromMenu(_ sender: Any?) {

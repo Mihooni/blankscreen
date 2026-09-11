@@ -103,6 +103,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 - **Battery guard.** Only on battery and discharging: below the floor (default 20%) a blackout is refused, and during a blackout the level is re-checked every 30 s — cross the floor and the display comes back with a notification. No effect on AC power.
 - **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
 - **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
+- **Update & about from the menu.** "View on GitHub" opens the repo in one click; "About LidKeep" shows the version, commit and license; "Check for Updates…" queries the GitHub Releases API and links to the download page when a newer version exists (with a manual fallback if the network is unavailable).
 
 ## Language
 
