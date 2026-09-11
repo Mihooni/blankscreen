@@ -1869,9 +1869,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 语义化版本比较：a 是否比 b 新（仅比 major.minor.patch 数字）
+    /// 先截掉预发布/构建元数据（`-beta.1`、`+build`）：若不截，`Int("0-beta")` 解析失败会被
+    /// compactMap 丢弃，导致后续数字**下标错位**，把 `2.2.0-beta.1` 误判成比 `2.2.0` 更新。
     private func isVersion(_ a: String, newerThan b: String) -> Bool {
-        let pa = a.split(separator: ".").compactMap { Int($0) }
-        let pb = b.split(separator: ".").compactMap { Int($0) }
+        let pa = releaseParts(a)
+        let pb = releaseParts(b)
         let n = max(pa.count, pb.count)
         for i in 0..<n {
             let x = i < pa.count ? pa[i] : 0
@@ -1879,6 +1881,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if x != y { return x > y }
         }
         return false
+    }
+
+    /// 把 `2.2.0-beta.1` / `2.2.0+build3` 这类版本串归一化成 `[2, 2, 0]`。
+    /// 只在第一个 `-` 或 `+` 处截断，非数字段一律丢弃。
+    private func releaseParts(_ s: String) -> [Int] {
+        let core = s.prefix { $0 != "-" && $0 != "+" }
+        return core.split(separator: ".").compactMap { Int($0) }
     }
 
     private func reportUpdateUpToDate() {
