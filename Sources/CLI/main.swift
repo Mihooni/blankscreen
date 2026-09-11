@@ -47,56 +47,6 @@ let resetDaemon = "/Library/LaunchDaemons/com.lidkeep.nosleep.reset.plist"
 
 let fm = FileManager.default
 
-// MARK: - v2.0.0 更名迁移（BlankScreen → LidKeep）
-// 产品在 v2.0.0 更名为 LidKeep，bundle id、配置目录与系统级组件路径全部改变。
-// 不做迁移会留下三类残留，其中第 3 类会直接导致功能异常：
-//   1. 用户配置丢失 —— 目录改名后新版本读不到热键、超时、电量等设置
-//   2. 旧登录项指向已不存在的可执行文件，每次登录都失败一次
-//   3. 旧系统级 helper 与 /var/db/blankscreen-nosleep 持有者账本仍在，与新版本
-//      的账本互不可见。老版本开过系统级防睡眠后，新版本无法把系统复位
-//      （disablesleep 是持久全局开关，没有任何界面会提示它开着）
-// 迁移必须幂等：每次启动都跑一遍，代价只有几次 stat。
-func migrateLegacyUserState() {
-    // 1) 配置目录整体改名。仅当新目录不存在时才动，避免覆盖新版本已有配置。
-    let legacyBaseDir = home + "/Library/Application Support/blankscreen"
-    if fm.fileExists(atPath: legacyBaseDir), !fm.fileExists(atPath: base) {
-        try? fm.moveItem(atPath: legacyBaseDir, toPath: base)
-    }
-    // 2) 旧日志文件名（目录整体改名会把它一起带过来）
-    let legacyLog = base + "/blankscreen.log"
-    if fm.fileExists(atPath: legacyLog) {
-        if fm.fileExists(atPath: logPath) { try? fm.removeItem(atPath: legacyLog) }
-        else { try? fm.moveItem(atPath: legacyLog, toPath: logPath) }
-    }
-    // 3) 旧登录项：先 bootout 再删 plist。只删文件不 bootout 的话，launchd 中
-    //    仍留着指向失效路径的注册项。
-    for l in ["com.blankscreen.bar", "com.blankscreen.agent"] {
-        let p = home + "/Library/LaunchAgents/\(l).plist"
-        guard fm.fileExists(atPath: p) else { continue }
-        _ = runCapture("/bin/launchctl", ["bootout", "gui/\(getuid())/\(l)"])
-        try? fm.removeItem(atPath: p)
-    }
-}
-
-/// 旧版本的系统级残留（删除它们需要 root）。uninstall-helper 用它判断
-/// 是否值得提权 —— 只看「新版助手是否存在」会让旧残留永远清不掉。
-func legacySystemLeftovers() -> [String] {
-    [
-        "/Library/PrivilegedHelperTools/com.blankscreen.pmset",
-        "/etc/sudoers.d/blankscreen",
-        "/Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist",
-        "/var/db/blankscreen-nosleep",
-    ].filter { fm.fileExists(atPath: $0) }
-}
-
-/// 旧版本残留的完整只读清单（含用户级的旧 App）。doctor 只负责报告，
-/// 清理由用户显式执行 `lidkeep nosleep uninstall-helper` 与删除旧 App 完成。
-func legacyLeftovers() -> [String] {
-    legacySystemLeftovers()
-        + (fm.fileExists(atPath: "/Applications/BlankScreenBar.app") ? ["/Applications/BlankScreenBar.app"] : [])
-}
-
-migrateLegacyUserState()
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
 func log(_ s: String) {
@@ -184,8 +134,12 @@ struct Config: Codable {
     /// 借鉴 WorkBuddy 的 parsePowerSaveBlockerMode：字段语义一旦变过，老配置必须能被纠正，
     /// 而不是沿用写盘时的旧含义。
     var schemaVersion: Int = 0
+    /// 以下两项由菜单栏 App 使用（自动检查更新）。CLI 不参与检查，但**必须镜像**：
+    /// 两侧共写同一个 config.json，CLI 落盘时用自身 CodingKeys 编码，缺字段就会被抹掉。
+    var autoCheckUpdate: Bool = true
+    var lastUpdateCheckAt: Double = 0
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -200,6 +154,8 @@ struct Config: Codable {
         lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
         keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+        autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? true
+        lastUpdateCheckAt = try c.decodeIfPresent(Double.self, forKey: .lastUpdateCheckAt) ?? 0
     }
     /// 逐版本升级旧配置。返回 true 表示有改动、需要回写。
     /// 只由 loadConfig() 调用一次：init 里跑过的话，loadConfig 再跑会因版本已最新而无从判断是否该回写。
@@ -783,13 +739,6 @@ func installHelperScript(_ user: String) -> String {
     let part1 = """
     #!/bin/sh
     set -e
-    # v2.0.0 更名：先清掉旧版 BlankScreen 的系统级组件。留着它们会让新旧两套
-    # 持有者账本并存 —— 新版本读不到旧账本，会出现「已退出却仍不睡眠」。
-    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
-    /bin/rm -f /Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist
-    /bin/rm -f /etc/sudoers.d/blankscreen
-    /bin/rm -f /Library/PrivilegedHelperTools/com.blankscreen.pmset
-
     H="\(helperPath)"
     S="\(sudoersPath)"
     D="\(resetDaemon)"
@@ -841,12 +790,6 @@ func uninstallHelperScript() -> String {
     /bin/rm -f \(resetDaemon)
     /bin/rm -f \(sudoersPath)
     /bin/rm -f \(helperPath)
-    # v2.0.0 更名：连带清掉旧版遗留，保证「卸载」真的干净
-    /bin/launchctl bootout system/com.blankscreen.nosleep.reset 2>/dev/null || true
-    /bin/rm -rf /var/db/blankscreen-nosleep
-    /bin/rm -f /Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist
-    /bin/rm -f /etc/sudoers.d/blankscreen
-    /bin/rm -f /Library/PrivilegedHelperTools/com.blankscreen.pmset
     echo "uninstalled"
     """
 }
@@ -1780,16 +1723,6 @@ func runDoctor() -> Int32 {
         }
     }
 
-    // 更名残留：只在真的存在时才输出本节，避免每次 doctor 都多一段噪音
-    let legacy = legacyLeftovers()
-    if !legacy.isEmpty {
-        print(L("\n【更名残留】"))
-        warns.append(L("BlankScreen 旧版残留"))
-        print(L("  ⚠️  检测到旧版 BlankScreen 的组件仍在（新旧两套防睡眠账本互相不可见）："))
-        for p in legacy { print("      " + p) }
-        print(L("  → 清理：sudo lidkeep nosleep uninstall-helper（会同时复位系统级防睡眠）"))
-    }
-
     print("")
     if !errors.isEmpty {
         print((L("结论：❌ ") + "\(errors.count)" + L(" 个问题需要修复 —— ") + "\(errors.joined(separator: L("；")))"))
@@ -2096,12 +2029,7 @@ case "nosleep":
         exit(ok ? 0 : 1)
 
     case "uninstall-helper":
-        // 新版助手没装、但存在旧版残留时同样要跑一遍卸载脚本：脚本本身负责清掉旧版
-        // BlankScreen 的 helper / sudoers / LaunchDaemon / 持有者账本，并复位系统级
-        // 防睡眠。只按「新版助手是否存在」提前返回，旧残留将永远无法被本命令清掉。
-        let legacySys = legacySystemLeftovers()
-        if !helperInstalled() && legacySys.isEmpty { print(L("提权助手未安装")); exit(0) }
-        if !helperInstalled() { print(L("未检测到新版助手，将清理旧版 BlankScreen 的系统级残留")) }
+        if !helperInstalled() { print(L("提权助手未安装")); exit(0) }
         // 先关掉正在运行的防睡眠，再卸载（顺序反了就再也无法复位）
         if let pid = nosleepPid() { kill(pid, SIGTERM); _ = waitUntil(timeout: 5.0) { nosleepPid() == nil } }
         let (ok, out) = runAsAdmin(uninstallHelperScript())

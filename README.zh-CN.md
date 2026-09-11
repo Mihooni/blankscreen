@@ -105,6 +105,7 @@ $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 - **CLI 与 App 状态互通**。SSH 里 `lidkeep on` 能唤醒菜单栏 App 关掉的屏幕，反之亦然。
 - **单实例**。重复启动会干净接管，并清理遗留的 `caffeinate` 孤儿进程。
 - **菜单里的更新与关于**。「在 GitHub 上查看」一键打开开源仓库；「关于 LidKeep」显示版本号、commit 与许可证；「检查更新…」调用 GitHub Releases API 对比版本，发现新版本时给出下载页入口（离线或受限网络时也能手动前往发布页）。
+- **后台自动检查更新**（默认开，可在设置里关掉）。App 每 24 小时静默查一次版本号，成功才记下时间戳——失败会留给下一个心跳重试，不会因为一次离线就整天不再检查。发现新版本时只在菜单栏打一个 `⬆` 徽标、并在菜单顶部放出「打开新版发布页」入口，不弹窗打断；提醒会一直留着，直到你装上新版为止。请求只读取公开的版本号，不上传任何本机信息。
 
 ## 界面语言
 
@@ -165,27 +166,11 @@ cp -R LidKeep.app /Applications/
 > 此时对 `.pkg` 右键 → **打开**，再确认即可。App 首次启动同理 —— 不过安装器已自动清除了
 > App 的隔离标记，装完直接就能正常打开。
 
-### 从 BlankScreen 升级（v1.x）
+### 从更早版本升级
 
-v1.6.5 之前这个产品叫 **BlankScreen**。v2.0.0 统一更名：CLI（`blankscreen` → `lidkeep`）、
-App（`BlankScreenBar.app` → `LidKeep.app`）以及全部 bundle identifier 都已改变。
-
-**设置会自动迁移。** 新版 App 或 CLI 第一次运行时，配置目录原样改名、旧登录项自动注销，
-热键、超时、电量下限与运行模式全部保留。
-
-有三样东西**不会**自动处理，因为它们在你主目录之外，或者需要 root：
-
-```bash
-sudo lidkeep nosleep uninstall-helper   # 清掉旧的提权助手、sudoers 规则与 LaunchDaemon，
-                                        # 并把系统级防睡眠复位
-rm -rf /Applications/BlankScreenBar.app # 删除旧版 App
-```
-
-第一条命令比看上去更重要：旧助手拥有自己的 `/var/db/blankscreen-nosleep` 持有者账本，
-新版本看不到它。留着它可能让 Mac 卡在「永不睡眠」，却看不出是谁开的。
-`lidkeep doctor` 会报告它发现的任何旧版残留。
-
-清理之后若仍需要合盖模式，在新版 App 的设置里重新装一次助手即可。
+本产品自 v2.0.0 起更名为 **LidKeep**，CLI 名、App 名与全部 bundle identifier 都已改变。
+v1.x 留下的状态（配置目录、登录项、提权助手与防睡眠持有者账本）**不再**自动迁移或清理：
+升级前请自行备份 `~/Library/Application Support/` 下对应目录，并删除旧版 App。
 
 ### 验证下载（可选）
 

@@ -544,12 +544,13 @@ let L10nTable: [String: String] = [
     "     → 这些与本程序无关；若要让 Mac 恢复自动睡眠，需到对应应用里关闭。": "     -> These are not from this app; turn them off in the owning app to let the Mac sleep again.",
     "  ⚠️  配置要求防睡眠，但当前没有任何断言在生效中（黑屏时才会起断言）": "  [warn] Settings ask to prevent sleep, but no assertion is active right now (it starts when the display is blanked)",
     "防睡眠未生效": "Sleep prevention not in effect",
-    "未检测到新版助手，将清理旧版 BlankScreen 的系统级残留": "No helper from this build; cleaning up the old BlankScreen system-level leftovers",
-    // v2.0.0 更名迁移：旧版 BlankScreen 残留报告
-    "\n【更名残留】": "\n[Legacy leftovers]",
-    "BlankScreen 旧版残留": "BlankScreen legacy leftovers",
-    "  ⚠️  检测到旧版 BlankScreen 的组件仍在（新旧两套防睡眠账本互相不可见）：": "  [warn] Components from the old BlankScreen build are still present (the two anti-sleep ledgers cannot see each other):",
-    "  → 清理：sudo lidkeep nosleep uninstall-helper（会同时复位系统级防睡眠）": "  -> Clean up: sudo lidkeep nosleep uninstall-helper (also resets system-level anti-sleep)",
+    // 自动检查更新
+    "自动检查更新": "Check for updates automatically",
+    "后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。": "Checks GitHub for the latest version once every 24 hours in the background; a newer release is flagged in the menu bar instead of interrupting with a dialog.",
+    "请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。": "The request only reads a public version number and uploads nothing about this Mac. The manual \"Check for Updates…\" ignores this switch.",
+    "⬆ 有新版本 ": "⬆ Update available ",
+    " —— 打开发布页": " — open the release page",
+    "发布页地址无效": "Invalid release page URL",
     // 检查更新 / 关于 / 跳转开源仓库
     "检查更新…": "Check for Updates…",
     "关于 LidKeep": "About LidKeep",

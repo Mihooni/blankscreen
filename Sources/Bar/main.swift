@@ -72,48 +72,6 @@ func loginItemPlist() -> String {
     </plist>
     """
 }
-// MARK: - v2.0.0 更名迁移（BlankScreen → LidKeep）
-// 与 CLI 侧同源（两边是独立编译单元，故各留一份）。必须在 createDirectory(base)
-// **之前**执行：否则新目录被提前建出来，目录改名会因为「目标已存在」而被跳过，
-// 用户的全部设置静默丢失。
-// 只处理用户级状态；系统级残留（helper / sudoers / LaunchDaemon）需 root，
-// 交给 `lidkeep nosleep uninstall-helper`，doctor 负责报告。
-func migrateLegacyUserState() {
-    let legacyBaseDir = home + "/Library/Application Support/blankscreen"
-    if fm.fileExists(atPath: legacyBaseDir), !fm.fileExists(atPath: base) {
-        try? fm.moveItem(atPath: legacyBaseDir, toPath: base)
-    }
-    // 旧日志文件名（目录整体改名会把它一起带过来）
-    let legacyLog = base + "/blankscreen.log"
-    if fm.fileExists(atPath: legacyLog) {
-        if fm.fileExists(atPath: logPath) { try? fm.removeItem(atPath: legacyLog) }
-        else { try? fm.moveItem(atPath: legacyLog, toPath: logPath) }
-    }
-    // 旧版若开着「登录时启动」，更名后必须替它把新 label 的登录项写回来，否则这个
-    // 设置会在改名的同时静默失效，用户只能自己重新勾一次。
-    // 只写 plist、不 bootstrap：本进程已经在运行，立刻 bootstrap 会拉起第二个实例
-    // 去和单实例接管逻辑抢；macOS 下次登录会自动加载 LaunchAgents 下的 plist，
-    // 语义与「登录时启动」完全一致。
-    let wasLoginItem = fm.fileExists(atPath: home + "/Library/LaunchAgents/com.blankscreen.bar.plist")
-    for l in ["com.blankscreen.bar", "com.blankscreen.agent"] {
-        let p = home + "/Library/LaunchAgents/\(l).plist"
-        guard fm.fileExists(atPath: p) else { continue }
-        let t = Process()
-        t.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        t.arguments = ["bootout", "gui/\(getuid())/\(l)"]
-        t.standardOutput = FileHandle.nullDevice
-        t.standardError = FileHandle.nullDevice
-        t.standardInput = FileHandle.nullDevice
-        try? t.run()
-        t.waitUntilExit()
-        try? fm.removeItem(atPath: p)
-    }
-    if wasLoginItem, !fm.fileExists(atPath: barPlist) {
-        try? loginItemPlist().write(toFile: barPlist, atomically: true, encoding: .utf8)
-    }
-}
-
-migrateLegacyUserState()
 try? fm.createDirectory(atPath: base, withIntermediateDirectories: true)
 
 func blog(_ s: String) {
@@ -140,8 +98,10 @@ struct Config: Codable {
     var lang: String = "auto"                            // 界面语言：auto=跟随系统 / zh / en
     var keepDisplayOn: Bool = false                      // 保持屏幕常亮：阻止显示器自动睡眠（caffeinate -d）
     var schemaVersion: Int = 0                           // 见 CLI 同名注释：旧配置读出 0，交由 migrate() 升级
+    var autoCheckUpdate: Bool = true                     // 后台自动检查更新（节流 24h，发现新版在菜单栏提示）
+    var lastUpdateCheckAt: Double = 0                    // 上次自动检查的 Unix 时间戳，仅用于节流
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -156,6 +116,8 @@ struct Config: Codable {
         lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? "auto"
         keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+        autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? true
+        lastUpdateCheckAt = try c.decodeIfPresent(Double.self, forKey: .lastUpdateCheckAt) ?? 0
     }
     @discardableResult
     mutating func migrate() -> Bool {
@@ -1033,6 +995,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     private var restoreSlider: NSSlider!
     private var restoreValueLabel: NSTextField!
     private var loginBtn: NSButton!
+    private var autoUpdateBtn: NSButton!
     private var permLabel: NSTextField!
     private var checkBtn: NSButton!
 
@@ -1167,6 +1130,11 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         root.addArrangedSubview(section(L("启动")))
         loginBtn = NSButton(checkboxWithTitle: L("登录时自动启动（菜单栏常驻）"), target: self, action: #selector(onLoginToggled(_:)))
         root.addArrangedSubview(loginBtn)
+        autoUpdateBtn = NSButton(checkboxWithTitle: L("自动检查更新"), target: self, action: #selector(onAutoUpdateToggled(_:)))
+        root.addArrangedSubview(autoUpdateBtn)
+        root.addArrangedSubview(wrapLabel(
+            L("后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。") +
+            L("请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。")))
 
         // —— 热键状态
         root.addArrangedSubview(section(L("热键状态")))
@@ -1239,6 +1207,7 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         restoreSlider.doubleValue = Double((fixed ?? 0.5) * 100)
         restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
         loginBtn.state = isLoginItemEnabled() ? .on : .off
+        autoUpdateBtn.state = cfg.autoCheckUpdate ? .on : .off
         syncNosleep()
         // 运行模式：由底层三个布尔推导，因此不存在「面板与真实状态不一致」
         let mode = currentPowerMode(cfg)
@@ -1373,6 +1342,12 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         if restorePop.indexOfSelectedItem == 1 { cfg.restoreFixed = Float(restoreSlider.doubleValue / 100) }
         commit()
     }
+    @objc private func onAutoUpdateToggled(_ sender: Any?) {
+        cfg.autoCheckUpdate = (autoUpdateBtn.state == .on)
+        commit()
+        // 立刻检查一次：让「打开开关」这个动作有即时反馈，而不是等下一个 24h 周期
+        AppDelegate.shared?.checkUpdateSilently()
+    }
     private func commit() {
         saveConfig(cfg)
         ctl.cfg = cfg
@@ -1453,6 +1428,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let repoURL = "https://github.com/Mihooni/lidkeep"
     private let releasesURL = "https://github.com/Mihooni/lidkeep/releases"
     private let latestAPI = "https://api.github.com/repos/Mihooni/lidkeep/releases/latest"
+    // 自动检查更新：后台静默轮询，发现新版只在菜单栏提示，不弹窗打断
+    private var updateItem: NSMenuItem!
+    private var updateSep: NSMenuItem!
+    private var newVersion: String?          // 已知有新版、用户尚未处理
+    private var newVersionURL: String?
+    private var updateTimer: Timer?
+    /// 自动检查的最小间隔。手动点「检查更新…」不受此限。
+    private let autoCheckInterval: TimeInterval = 24 * 3600
 
     func applicationDidFinishLaunching(_ a: Notification) {
         AppDelegate.shared = self
@@ -1473,6 +1456,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 热键走 Carbon 链路，不依赖辅助功能授权；这里只反映注册结果
         hotkeyUnavailable = !ctl.hotkeyReady
         refreshUI()
+
+        // 自动检查更新：启动 20 秒后先来一次（避开启动瞬间的磁盘/网络争用），此后每 6 小时
+        // 复核一次。真正决定是否发请求的是 maybeAutoCheckUpdate() 里的 24h 节流闸门。
+        Timer.scheduledTimer(withTimeInterval: 20, repeats: false) { [weak self] _ in
+            self?.maybeAutoCheckUpdate()
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.maybeAutoCheckUpdate()
+        }
 
         // 调试用：构建设置面板并打印布局树，验证无零尺寸 / 越界后自动退出
         if CommandLine.arguments.contains("--uitest") {
@@ -1510,6 +1502,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 菜单
     private func buildMenu() -> NSMenu {
         let m = NSMenu()
+        // 发现新版本时的置顶提醒（默认隐藏）。不弹窗：菜单栏工具打断用户代价太高，
+        // 徽标 + 置顶条目足以被看见，且不会在用户忙时抢焦点。
+        updateItem = NSMenuItem(title: "", action: #selector(openPendingUpdate(_:)), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isHidden = true
+        m.addItem(updateItem)
+        updateSep = .separator()
+        updateSep.isHidden = true
+        m.addItem(updateSep)
         // MARK: 三个核心功能，表述一一对应：
         //   ① 关闭显示器 —— 立即黑屏（机器保持运行）
         //   ② 息屏时不睡眠 —— 每次息屏/关屏期间自动阻止系统睡眠
@@ -1569,7 +1570,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let blacked = ctl.blacked
         statusItem.button?.image = icon(blacked: blacked)
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.title = hotkeyUnavailable ? "⚠" : ""
+        // 菜单栏徽标：快捷键异常优先于「有新版本」——前者会直接影响使用
+        statusItem.button?.title = hotkeyUnavailable ? "⚠" : (newVersion != nil ? "⬆" : "")
         statusItem.button?.toolTip = hotkeyUnavailable
             ? (L("LidKeep —— 快捷键未生效：") + "\(carbonStatusText(ctl.lastHotkeyStatus))")
             : (L("LidKeep —— 快捷键 ") + "\(hotkeyText(ctl.cfg))" + L("，点击打开菜单"))
@@ -1593,6 +1595,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             permItem.isHidden = false
         } else {
             permItem.isHidden = true
+        }
+        if let v = newVersion {
+            updateItem.title = L("⬆ 有新版本 ") + "v\(v)" + L(" —— 打开发布页")
+            updateItem.isHidden = false
+            updateSep.isHidden = false
+        } else {
+            updateItem.isHidden = true
+            updateSep.isHidden = true
         }
     }
 
@@ -1781,32 +1791,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 检查更新：拉取 GitHub Releases 的最新 tag，与本机版本比较
     @objc private func checkUpdate(_ sender: Any?) {
-        guard let url = URL(string: latestAPI) else { return }
+        fetchLatestVersion { [weak self] latest, html, error in
+            guard let self = self else { return }
+            guard let latest = latest else {
+                self.reportUpdateFailure(message: error ?? L("无法解析更新信息"))
+                return
+            }
+            if self.isVersion(latest, newerThan: LK_VERSION) {
+                self.reportUpdateAvailable(latest: latest, html: html)
+            } else {
+                self.reportUpdateUpToDate()
+            }
+        }
+    }
+
+    /// 拉取最新版本：成功回 (版本号, 发布页 URL, nil)，失败回 (nil, nil, 原因)。
+    /// 手动检查与后台自动检查共用这一处，避免两份请求逻辑各自演化。
+    private func fetchLatestVersion(completion: @escaping (String?, String?, String?) -> Void) {
+        guard let url = URL(string: latestAPI) else {
+            completion(nil, nil, L("发布页地址无效")); return
+        }
         var req = URLRequest(url: url, timeoutInterval: 15)
         // GitHub API 对未带 User-Agent 的请求会返回 403，必须设置
         req.setValue("LidKeep", forHTTPHeaderField: "User-Agent")
-        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
+        URLSession.shared.dataTask(with: req) { data, _, err in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                if let err = err {
-                    self.reportUpdateFailure(message: err.localizedDescription)
-                    return
-                }
+                if let err = err { completion(nil, nil, err.localizedDescription); return }
                 guard let data = data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tag = json["tag_name"] as? String else {
-                    self.reportUpdateFailure(message: L("无法解析更新信息"))
-                    return
+                    completion(nil, nil, L("无法解析更新信息")); return
                 }
-                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-                if self.isVersion(latest, newerThan: LK_VERSION) {
-                    self.reportUpdateAvailable(latest: latest, html: json["html_url"] as? String)
-                } else {
-                    self.reportUpdateUpToDate()
-                }
+                completion(tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+                           json["html_url"] as? String, nil)
             }
+        }.resume()
+    }
+
+    /// 自动检查的节流闸门：开关关闭、或距上次**成功**检查不足 24h 时直接返回。
+    private func maybeAutoCheckUpdate() {
+        let c = ctl.cfg
+        guard c.autoCheckUpdate else { return }
+        guard Date().timeIntervalSince1970 - c.lastUpdateCheckAt >= autoCheckInterval else { return }
+        checkUpdateSilently()
+    }
+
+    /// 静默检查一次（只记状态、不弹窗）。开关刚打开时也调它，让动作有即时反馈。
+    /// 时间戳只在**成功**后落盘：失败留给下一个 6h 心跳重试，否则离线一次就整天不再检查。
+    func checkUpdateSilently() {
+        fetchLatestVersion { [weak self] latest, html, error in
+            guard let self = self else { return }
+            // 后台功能最怕静默失败：三个分支各留一条日志，事后能查
+            guard let latest = latest else {
+                blog("bar: 自动检查更新 失败：\(error ?? L("无法解析更新信息"))")
+                return
+            }
+            var c = self.ctl.cfg
+            c.lastUpdateCheckAt = Date().timeIntervalSince1970
+            saveConfig(c)
+            self.ctl.cfg = c
+            guard self.isVersion(latest, newerThan: LK_VERSION) else {
+                blog("bar: 自动检查更新 已是最新（本机 v\(LK_VERSION)）")
+                return
+            }
+            // 只记住、不改动屏幕状态：等用户自己点置顶条目前往发布页
+            self.newVersion = latest
+            self.newVersionURL = html
+            self.refreshUI()
+            blog("bar: 自动检查更新 发现新版本 v\(latest)")
         }
-        task.resume()
+    }
+
+    /// 点击置顶的「有新版本」：打开发布页。不清除标记 —— 提醒会一直留在菜单栏
+    /// 直到真的装上新版（LK_VERSION 追平），避免「看了一眼就再也想不起来」。
+    @objc private func openPendingUpdate(_ sender: Any?) {
+        if let u = URL(string: newVersionURL ?? releasesURL) { NSWorkspace.shared.open(u) }
     }
 
     /// 语义化版本比较：a 是否比 b 新（仅比 major.minor.patch 数字）

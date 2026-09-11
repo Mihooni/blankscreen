@@ -104,6 +104,7 @@ The trade-off is deliberate: true display sleep saves ~0.5–1.5 W more, but mak
 - **CLI and app share state.** `lidkeep on` over SSH can restore a screen the menu bar app turned off, and vice versa.
 - **Single instance.** Launching a second copy takes over cleanly and kills orphaned `caffeinate` helpers.
 - **Update & about from the menu.** "View on GitHub" opens the repo in one click; "About LidKeep" shows the version, commit and license; "Check for Updates…" queries the GitHub Releases API and links to the download page when a newer version exists (with a manual fallback if the network is unavailable).
+- **Automatic update checks** (on by default, switchable in Settings). The app quietly reads the latest version number once every 24 hours and only records the timestamp on success — a failed check is retried on the next heartbeat instead of leaving you unchecked for a whole day. A newer release raises a `⬆` badge in the menu bar and puts an "open the release page" entry at the top of the menu; nothing interrupts you, and the reminder stays until you actually install the new version. The request only reads a public version number and uploads nothing about your Mac.
 
 ## Language
 
@@ -166,29 +167,12 @@ cp -R LidKeep.app /Applications/
 > installer already clears its quarantine flag, so the app should open normally
 > right after installing.
 
-### Upgrading from BlankScreen (v1.x)
+### Upgrading from an older release
 
-Before v1.6.5 this product was called **BlankScreen**. v2.0.0 renames everything: the CLI
-(`blankscreen` → `lidkeep`), the app (`BlankScreenBar.app` → `LidKeep.app`) and every bundle
-identifier.
-
-**Your settings migrate automatically.** The first time the new app or CLI runs, the config
-folder is renamed in place and the old login item is unregistered — hotkey, timeout, battery
-floor and power mode are all preserved.
-
-Three things are **not** automatic, because they live outside your home folder or need root:
-
-```bash
-sudo lidkeep nosleep uninstall-helper   # removes the old privileged helper, sudoers rule and
-                                        # LaunchDaemon, and resets system-level anti-sleep
-rm -rf /Applications/BlankScreenBar.app # removes the old app bundle
-```
-
-The first command matters more than it looks: the old helper owns its own
-`/var/db/blankscreen-nosleep` ledger, which the new build cannot see. Leaving it behind can pin
-your Mac in "never sleep" with no visible owner. `lidkeep doctor` reports any leftovers it finds.
-
-If you still want closed-lid mode afterwards, install the helper again from the new app's settings.
+The product has been called **LidKeep** since v2.0.0, when the CLI name, the app name and every
+bundle identifier changed. State left behind by v1.x — its config folder, login item, privileged
+helper and anti-sleep ledger — is **not** migrated or cleaned up automatically any more: back up
+`~/Library/Application Support/` and remove the old app yourself before upgrading.
 
 ### Verify a download (optional)
 
