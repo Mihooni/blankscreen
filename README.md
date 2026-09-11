@@ -270,7 +270,7 @@ gh attestation verify lidkeep-macos.zip -R Mihooni/lidkeep   # built by this rep
 - **Turn Display Off** — black out now, machine keeps running (click again or press the hotkey to restore)
 - **Power mode ▸** — four exclusive choices: Off / Stay awake, display may sleep / Keep display on / Run with lid closed
 - **Install Privileged Helper…** (first run) — extends lid-closed mode to battery and closed lid (one password prompt)
-- **Settings…** — hotkey combo + key, fallback timeout, battery guard, restore-brightness policy, launch at login
+- **Settings…** — four tabs: General (power mode, restore brightness), Hotkey (record any combination, enable/disable the global hotkey, fallback timeout), Battery (custom floor + what happens when it is hit: restore the display / restore **and** release anti-sleep so the Mac behaves like normal on battery / notify only), Other (launch at login, update checks, safety note)
 - **Hotkey Self-test** — synthesizes your hotkey once and verifies the delivery path (no side effects)
 - **Open Log**
 

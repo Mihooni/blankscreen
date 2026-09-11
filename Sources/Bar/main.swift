@@ -92,6 +92,8 @@ struct Config: Codable {
     var timeout: Double = 43200              // 黑屏后自动恢复兜底，秒；0 = 不启用
     var restoreFixed: Float? = nil           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20               // 电量下限 %，0 = 不限制
+    var batteryAction: Int = 0               // 触底时做什么，见 BatteryAction；0 = 只恢复屏幕
+    var hotkeyEnabled: Bool = true           // 是否注册全局热键；关掉后只能从菜单栏点击
     var autoNosleep: Bool = false            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
     var lidAwake: Bool = false                           // 合盖不睡眠长期模式（菜单一键开关，重启自动恢复）
     var lidBlackout: Bool = true                         // 合盖时熄灭内屏（与 lidAwake 分离的独立开关）
@@ -101,7 +103,7 @@ struct Config: Codable {
     var autoCheckUpdate: Bool = true                     // 后台自动检查更新（节流 24h，发现新版在菜单栏提示）
     var lastUpdateCheckAt: Double = 0                    // 上次自动检查的 Unix 时间戳，仅用于节流
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, batteryAction, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt, hotkeyEnabled }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -110,6 +112,8 @@ struct Config: Codable {
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
+        batteryAction = try c.decodeIfPresent(Int.self, forKey: .batteryAction) ?? 0
+        hotkeyEnabled = try c.decodeIfPresent(Bool.self, forKey: .hotkeyEnabled) ?? true
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
         lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
@@ -255,7 +259,13 @@ let keyItems: [(String, Int64)] = [
     ("F7", 98), ("F8", 100), ("F9", 101), ("F10", 109), ("F11", 103), ("F12", 111),
     ("F13", 105), ("F14", 107), ("F15", 113), ("F16", 106), ("F17", 64), ("F18", 79),
     ("F19", 80), ("F20", 90),
-    (L("Space 空格"), 49), ("Esc", 53), (L("Return 回车"), 36), ("Tab", 48)
+    ("0", 29), ("1", 18), ("2", 19), ("3", 20), ("4", 21), ("5", 23),
+    ("6", 22), ("7", 26), ("8", 28), ("9", 25),
+    ("-", 27), ("=", 24), ("[", 33), ("]", 30), ("\\", 42), (";", 41),
+    ("'", 39), (",", 43), (".", 47), ("/", 44), ("`", 50),
+    ("←", 123), ("→", 124), ("↓", 125), ("↑", 126),
+    ("Home", 115), ("End", 119), ("PgUp", 116), ("PgDn", 121),
+    ("Space", 49), ("Esc", 53), ("Return", 36), ("Tab", 48), ("Delete", 51)
 ]
 func keyName(_ code: Int64) -> String { keyItems.first { $0.1 == code }?.0 ?? "keyCode \(code)" }
 func modText(_ flags: UInt64) -> String {
@@ -309,6 +319,11 @@ func registerCarbonHotKey(keyCode: Int64, modFlags: UInt64) -> OSStatus {
                                  GetEventDispatcherTarget(), 0, &carbonHotKeyRef)
     if st != noErr { carbonHotKeyRef = nil }
     return st
+}
+/// 注销全局热键（用户关掉「启用全局热键」时调用）。
+/// 只摘掉热键本身，事件处理器留着复用。
+func unregisterCarbonHotKey() {
+    if let old = carbonHotKeyRef { UnregisterEventHotKey(old); carbonHotKeyRef = nil }
 }
 func carbonStatusText(_ st: OSStatus) -> String {
     switch st {
@@ -435,6 +450,8 @@ final class ScreenController {
     var pinTimer: Timer?
     var timeoutTimer: Timer?
     var battTimer: Timer?
+    /// 同一轮低电量只提醒一次。30 秒一轮的检查会把通知中心刷满。
+    private var battNotified = false
     var cmdTimer: Timer?
     var signalSources: [DispatchSourceSignal] = []
     var configMtime: Date? = nil
@@ -487,12 +504,9 @@ final class ScreenController {
                 blog("bar: 合盖模式需要提权助手（覆盖合盖睡眠必须 root）")
                 return false
             }
-            if c.batteryFloor > 0 {
-                let b = batteryStatus()
-                if b.onBattery && b.discharging && b.percent <= c.batteryFloor {
-                    blog("bar: 电量 \(b.percent)% 低于下限，暂不能开启合盖模式")
-                    return false
-                }
+            if batteryBlocksStart(c) {
+                blog("bar: 电量 \(batteryStatus().percent)% 低于下限，暂不能开启合盖模式")
+                return false
             }
             let p = Process()
             p.executableURL = URL(fileURLWithPath: cli)
@@ -582,11 +596,9 @@ final class ScreenController {
         guard !nosleepOn else { return true }
         // 电量下限对防睡眠同样强制生效：合盖 + 电池 + 不睡是最容易耗尽电量的组合，
         // 机器在包里一直跑到没电，用户却毫不知情。
-        if cfg.batteryFloor > 0 {
+        if batteryBlocksStart(cfg) {
             let b = batteryStatus()
-            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消开启防睡眠（避免耗尽电池）")))
-            }
+            return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消开启防睡眠（避免耗尽电池）")))
         }
         let pid = ProcessInfo.processInfo.processIdentifier
         let c = Process()
@@ -672,11 +684,9 @@ final class ScreenController {
             return reject(L("亮度接口不可用（DisplayServices 缺失），无法关屏"))
         }
         // 电量下限：黑屏 + 阻止睡眠的组合让人最容易忘记，耗尽电池会带走未保存的工作
-        if cfg.batteryFloor > 0 {
+        if batteryBlocksStart(cfg) {
             let b = batteryStatus()
-            if b.onBattery && b.discharging && b.percent <= cfg.batteryFloor {
-                return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消关屏（避免耗尽电池）")))
-            }
+            return reject((L("电量 ") + "\(b.percent)" + L("% 低于下限 ") + "\(cfg.batteryFloor)" + L("%，已取消关屏（避免耗尽电池）")))
         }
         try? fm.removeItem(atPath: rejectFile)
         let cur = max(readBrightness(), 0)
@@ -703,18 +713,47 @@ final class ScreenController {
     // 即使用户想保持黑屏也不放行——耗尽电池的代价比「被打断」大得多
     /// 电量守卫同时覆盖黑屏与防睡眠：合盖 + 电池 + 不睡眠是最容易耗尽电量的组合，
     /// 机器在包里持续发热直到没电，用户却毫不知情。
+    /// 电池触底后的「彻底放手」：恢复屏幕 + 撤销防睡眠 + 退出合盖运行，
+    /// 让 Mac 回到系统原本的省电行为（该睡就能睡）。
+    /// 用户在设置里选「回到原本的电池行为」时走的就是这条路径。
+    func releaseForBattery(_ reason: String) {
+        blog("bar: \(reason) —— 撤销全部防睡眠，回到系统原本的电池行为")
+        if blacked { restore() }
+        stopNosleep(reason)
+        guard cfg.lidAwake else { return }
+        _ = setLidAwake(false)
+        cfg = loadConfig()          // setLidAwake 自己写过配置，重读以免覆盖它的结果
+        syncKeepDisplayOn()
+        onStateChange?()
+    }
+
+    /// 每 30s 复查电量，跌破下限后按用户选的动作处理。
+    /// 覆盖黑屏、防睡眠与合盖运行——合盖 + 电池 + 不睡眠是最容易耗尽电量的组合，
+    /// 机器在包里持续发热直到没电，用户却毫不知情。
     func scheduleBatteryGuard() {
         battTimer?.invalidate(); battTimer = nil
+        battNotified = false
         guard cfg.batteryFloor > 0 else { return }
         let t = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self = self, self.blacked || self.nosleepOn else { return }
+            guard let self = self, self.blacked || self.nosleepOn || self.lidOn else { return }
             let b = batteryStatus()
-            guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else { return }
+            guard b.onBattery && b.discharging, b.percent <= self.cfg.batteryFloor else {
+                self.battNotified = false       // 插上电或充回来了，解除提醒锁
+                return
+            }
+            guard !self.battNotified else { return }
+            self.battNotified = true
             let m = (L("电量 ") + "\(b.percent)" + L("% 已达下限 ") + "\(self.cfg.batteryFloor)" + L("%，自动恢复"))
             blog("bar: \(m)")
             notifyUser(m)
-            self.stopNosleep((L("电量已达下限 ") + "\(self.cfg.batteryFloor)" + "%"))
-            if self.blacked { self.restore() }
+            switch BatteryAction(rawValue: self.cfg.batteryAction) ?? .restoreOnly {
+            case .restoreOnly:
+                if self.blacked { self.restore() }
+            case .restoreAndRelease:
+                self.releaseForBattery((L("电量已达下限 ") + "\(self.cfg.batteryFloor)" + "%"))
+            case .notifyOnly:
+                break                            // 只提醒，状态原样保留
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         battTimer = t
@@ -772,6 +811,14 @@ final class ScreenController {
         carbonFire = { [weak self] in
             guard self?.selfTesting != true else { return }
             self?.toggle()
+        }
+        // 用户可以整个关掉热键：此时不注册，也不该报「注册失败」的警示
+        guard cfg.hotkeyEnabled else {
+            unregisterCarbonHotKey()
+            hotkeyReady = false
+            lastHotkeyStatus = noErr
+            blog("bar: 全局热键已按设置停用")
+            return
         }
         let st = registerCarbonHotKey(keyCode: cfg.keyCode, modFlags: cfg.modFlags)
         hotkeyReady = (st == noErr)
@@ -977,36 +1024,165 @@ final class ScreenController {
 }
 
 // MARK: - 设置面板
+
+// MARK: - 布局辅助
+
+/// 滚动容器默认把内容贴在底部（坐标系未翻转），内容比可视区矮时会留一大片空白。
+/// 用翻转坐标系的容器把内容钉在顶部。
+final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
+// MARK: - 电池保护：触底时做什么
+
+enum BatteryAction: Int, CaseIterable {
+    case restoreOnly = 0        // 只恢复屏幕，防睡眠继续
+    case restoreAndRelease = 1  // 恢复屏幕 + 撤销防睡眠 + 退出合盖运行
+    case notifyOnly = 2         // 只提醒，不自动干预
+
+    var title: String {
+        switch self {
+        case .restoreOnly:       return L("恢复屏幕，继续防睡眠")
+        case .restoreAndRelease: return L("恢复屏幕并撤销防睡眠（回到原本的电池行为）")
+        case .notifyOnly:        return L("只提醒，不自动干预")
+        }
+    }
+    var detail: String {
+        switch self {
+        case .restoreOnly:
+            return L("屏幕亮起，机器继续保持不睡眠。适合还要把任务跑完的场景。")
+        case .restoreAndRelease:
+            return L("屏幕亮起，同时撤销防睡眠并退出合盖运行，Mac 回到系统原本的省电行为，可以正常睡眠。")
+        case .notifyOnly:
+            return L("只在通知中心提醒一次，不改变任何状态，由你自己决定。")
+        }
+    }
+}
+
+/// 电量是否低到「不该再启动」新的耗电动作（防睡眠 / 关屏 / 合盖运行）。
+/// 「只提醒」模式下不拦截——那正是用户选择自己负责的含义。
+func batteryBlocksStart(_ c: Config) -> Bool {
+    guard c.batteryFloor > 0 else { return false }
+    if BatteryAction(rawValue: c.batteryAction) ?? .restoreOnly == .notifyOnly { return false }
+    let b = batteryStatus()
+    return b.onBattery && b.discharging && b.percent <= c.batteryFloor
+}
+
+// MARK: - 热键录入控件
+/// 点一下进入录制，直接按组合键即可写入。
+/// 相比「修饰键勾选框 + 按键下拉框」，它能录入键盘上的任意键，而不只是预设表里的一小部分。
+final class HotkeyRecorder: NSButton {
+    var onCapture: ((UInt64, Int64) -> Void)?
+    var onClear: (() -> Void)?
+    /// 外部写入的展示文本
+    var displayText: String = "" { didSet { if !recording { refreshTitle() } } }
+    private(set) var recording = false { didSet { refreshTitle() } }
+    /// 录��期间临时摘下的菜单快捷键，结束时要装回去
+    private var savedEquivalents: [(NSMenuItem, String)] = []
+
+    /// 纯修饰键的虚拟键码，只按这些键时不算录入完成
+    private static let pureModifiers: Set<Int64> = [54, 55, 56, 58, 59, 60, 61, 62, 63]
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        startRecording()
+    }
+
+    func startRecording() {
+        guard !recording else { return }
+        suspendMenuEquivalents()
+        recording = true
+        window?.makeFirstResponder(self)
+    }
+
+    /// 结束录制并恢复菜单快捷键。窗口关闭、焦点丢失都要走到这里，
+    /// 否则菜单的 ⌘, / ⌘Q 会永久失效。
+    func stopRecording() {
+        guard recording else { return }
+        recording = false
+        restoreMenuEquivalents()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        stopRecording()
+        return true
+    }
+    override func cancelOperation(_ sender: Any?) { stopRecording() }
+
+    override func keyDown(with event: NSEvent) {
+        guard recording else { super.keyDown(with: event); return }
+        let code = Int64(event.keyCode)
+        if code == 53 { stopRecording(); return }                  // Esc 取消
+        if code == 51 { stopRecording(); onClear?(); return }      // ⌫ 清除
+        if HotkeyRecorder.pureModifiers.contains(code) { return }  // 只按了修饰键，继续等
+
+        var f: UInt64 = 0
+        let m = event.modifierFlags.intersection([.control, .option, .command, .shift])
+        if m.contains(.control) { f |= MOD_CTRL }
+        if m.contains(.option)  { f |= MOD_ALT }
+        if m.contains(.command) { f |= MOD_CMD }
+        if m.contains(.shift)   { f |= MOD_SHIFT }
+        // 系统级全局热键必须带至少一个修饰键，否则 RegisterEventHotKey 直接失败
+        guard f != 0 else { NSSound.beep(); return }
+        stopRecording()
+        onCapture?(f, code)
+    }
+
+    private func refreshTitle() {
+        title = recording ? L("按下组合键…（Esc 取消）") : displayText
+    }
+
+    /// 菜单快捷键（⌘, 打开设置、⌘Q 退出）由 NSApp 在 keyDown 之前截走，
+    /// 录制 ⌘, 这类组合时会永远收不到。录制期间先把它们摘掉。
+    private func suspendMenuEquivalents() {
+        savedEquivalents.removeAll()
+        func walk(_ menu: NSMenu) {
+            for it in menu.items {
+                if !it.keyEquivalent.isEmpty {
+                    savedEquivalents.append((it, it.keyEquivalent))
+                    it.keyEquivalent = ""
+                }
+                if let sm = it.submenu { walk(sm) }
+            }
+        }
+        if let mm = NSApp.mainMenu { walk(mm) }
+    }
+    private func restoreMenuEquivalents() {
+        for (it, eq) in savedEquivalents { it.keyEquivalent = eq }
+        savedEquivalents.removeAll()
+    }
+}
+
+// MARK: - 设置面板
 final class SettingsPanel: NSObject, NSWindowDelegate {
     private var window: NSWindow!
     private let ctl = ScreenController.shared
     private var cfg = loadConfig()          // 面板内的编辑副本，保存时才写回生效
 
-    private var modBtns: [UInt64: NSButton] = [:]
-    private var keyPop: NSPopUpButton!
-    private var hkLabel: NSTextField!
+    // 热键
+    private var hkEnableBtn: NSButton!
+    private var hkRecorder: HotkeyRecorder!
+    private var hkStatusLabel: NSTextField!
     private var timeoutPop: NSPopUpButton!
-    private var batteryPop: NSPopUpButton!
-    private var restorePop: NSPopUpButton!
+    // 电池
+    private var battSlider: NSSlider!
+    private var battValueLabel: NSTextField!
+    private var battActionBtns: [NSButton] = []
+    // 通用
     private var modeBtns: [NSButton] = []
     private var lidBlackoutBtn: NSButton!
     private var helperLabel: NSTextField!
     private var helperBtn: NSButton!
+    private var restorePop: NSPopUpButton!
     private var restoreSlider: NSSlider!
     private var restoreValueLabel: NSTextField!
+    // 其他
     private var loginBtn: NSButton!
     private var autoUpdateBtn: NSButton!
-    private var permLabel: NSTextField!
-    private var checkBtn: NSButton!
 
     private let timeoutChoices: [(String, Double)] = [
         (L("不启用（一直保持黑屏）"), 0),
         (L("30 分钟"), 1800), (L("1 小时"), 3600), (L("2 小时"), 7200),
         (L("4 小时"), 14400), (L("8 小时"), 28800), (L("12 小时"), 43200)
-    ]
-    private let batteryChoices: [(String, Int)] = [
-        (L("不限制"), 0), ("50%", 50), ("30%", 30),
-        (L("20%（推荐）"), 20), ("15%", 15), ("10%", 10)
     ]
 
     func show() {
@@ -1016,81 +1192,52 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// 窗口关闭时若还在录制，菜单快捷键必须装回去
+    func windowWillClose(_ notification: Notification) {
+        hkRecorder?.stopRecording()
+    }
+
+    // MARK: 窗口骨架：分页 + 可滚动
+    //
+    // 原先是 470×830 的单列长窗：八个小节挤在一起、不能滚动，小屏上直接被截断。
+    // 改成 4 个标签页后每页只装一两类设置，且每页可滚动——以后再加设置也不会撑破。
     private func build() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 830),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = L("LidKeep 设置")
         w.delegate = self
         w.isReleasedWhenClosed = false
         w.center()
 
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .leading
-        root.spacing = 14
-        root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
-        w.contentView = root
-        root.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            root.topAnchor.constraint(equalTo: w.contentView!.topAnchor),
-            root.bottomAnchor.constraint(equalTo: w.contentView!.bottomAnchor),
-            root.leadingAnchor.constraint(equalTo: w.contentView!.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: w.contentView!.trailingAnchor)
-        ])
+        let tab = NSTabView(frame: NSRect(x: 0, y: 0, width: 560, height: 560))
+        tab.tabViewType = .topTabsBezelBorder
+        tab.autoresizingMask = [.width, .height]
+        tab.addTabViewItem(tabItem(L("通用"), buildGeneralTab()))
+        tab.addTabViewItem(tabItem(L("热键"), buildHotkeyTab()))
+        tab.addTabViewItem(tabItem(L("电池"), buildBatteryTab()))
+        tab.addTabViewItem(tabItem(L("其他"), buildMiscTab()))
+        w.contentView = tab
+        return w
+    }
 
-        // —— 热键
-        root.addArrangedSubview(section(L("恢复热键")))
-        let modRow = NSStackView(); modRow.orientation = .horizontal; modRow.spacing = 10
-        for (title, flag) in [("⌃ Control", MOD_CTRL), ("⌥ Option", MOD_ALT),
-                              ("⌘ Command", MOD_CMD), ("⇧ Shift", MOD_SHIFT)] {
-            let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(onHotkeyChanged(_:)))
-            modBtns[flag] = b
-            modRow.addArrangedSubview(b)
-        }
-        root.addArrangedSubview(modRow)
-
-        keyPop = NSPopUpButton(frame: .zero, pullsDown: false)
-        keyPop.addItems(withTitles: keyItems.map { "\($0.0)" })
-        keyPop.target = self; keyPop.action = #selector(onHotkeyChanged(_:))
-        root.addArrangedSubview(row(L("按键"), keyPop))
-
-        hkLabel = NSTextField(labelWithString: "")
-        hkLabel.font = .systemFont(ofSize: 12)
-        hkLabel.textColor = .secondaryLabelColor
-        root.addArrangedSubview(hkLabel)
-
-        // —— 兜底超时
-        root.addArrangedSubview(section(L("自动恢复兜底")))
-        timeoutPop = NSPopUpButton(frame: .zero, pullsDown: false)
-        timeoutPop.addItems(withTitles: timeoutChoices.map { $0.0 })
-        timeoutPop.target = self; timeoutPop.action = #selector(onTimeoutChanged(_:))
-        root.addArrangedSubview(row(L("黑屏后"), timeoutPop))
-        let tip = wrapLabel(L("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。"))
-        root.addArrangedSubview(tip)
-
-        // —— 电量下限
-        root.addArrangedSubview(section(L("电量保护")))
-        batteryPop = NSPopUpButton(frame: .zero, pullsDown: false)
-        batteryPop.addItems(withTitles: batteryChoices.map { $0.0 })
-        batteryPop.target = self; batteryPop.action = #selector(onBatteryChanged(_:))
-        root.addArrangedSubview(row(L("低于"), batteryPop))
-        let battTip = wrapLabel(L("仅在使用电池且正在放电时生效：低于下限会拒绝关屏；黑屏期间跌破下限则自动恢复并通知。插着电源时不干预。"))
-        root.addArrangedSubview(battTip)
+    // MARK: 通用
+    private func buildGeneralTab() -> NSView {
+        let stack = column()
 
         // —— 运行模式：四选一。每个选项下面紧跟一句「即时代价」，
         //    用户不必读文档就知道选了会怎样（借鉴 WorkBuddy 的写法）。
-        root.addArrangedSubview(section(L("运行模式")))
+        var modeViews: [NSView] = []
         for (i, pm) in PowerMode.allCases.enumerated() {
             let b = NSButton(radioButtonWithTitle: pm.title, target: self, action: #selector(onPowerModeSelected(_:)))
             b.tag = i
             b.font = .systemFont(ofSize: 13)
-            root.addArrangedSubview(b)
-            root.addArrangedSubview(indent(wrapLabel(pm.cost)))
+            modeViews.append(b)
+            modeViews.append(indent(wrapLabel(pm.cost)))
             modeBtns.append(b)
         }
         lidBlackoutBtn = NSButton(checkboxWithTitle: L("合盖时熄灭内屏"), target: self, action: #selector(onLidBlackoutToggled(_:)))
-        root.addArrangedSubview(lidBlackoutBtn)
-        root.addArrangedSubview(wrapLabel(
+        modeViews.append(lidBlackoutBtn)
+        modeViews.append(wrapLabel(
             L("「合盖时熄灭内屏」由合盖守护执行，因此需要先选择「合盖运行」；") +
             L("个别机型熄屏后亮度回不来时，可单独关掉它作为退路。") +
             L("合盖运行建议接电源使用；电池放电低于电量下限会自动停止。需要提权助手（下方安装）。")))
@@ -1098,77 +1245,228 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         let helperRow = NSStackView(); helperRow.orientation = .horizontal; helperRow.spacing = 10
         helperBtn = NSButton(title: L("安装提权助手…"), target: self, action: #selector(onInstallHelper(_:)))
         helperRow.addArrangedSubview(helperBtn)
-        root.addArrangedSubview(helperRow)
+        modeViews.append(helperRow)
         helperLabel = wrapLabel("")
-        root.addArrangedSubview(helperLabel)
+        modeViews.append(helperLabel)
+        stack.addArrangedSubview(group(L("运行模式"), stackOf(modeViews)))
 
-        // —— 恢复亮度
-        root.addArrangedSubview(section(L("恢复后的亮度")))
+        // —— 恢复后的亮度
         restorePop = NSPopUpButton(frame: .zero, pullsDown: false)
         restorePop.addItems(withTitles: [L("恢复到关屏前的亮度"), L("固定为")])
         restorePop.target = self; restorePop.action = #selector(onRestoreModeChanged(_:))
-        root.addArrangedSubview(row(L("策略"), restorePop))
 
         let sliderRow = NSStackView(); sliderRow.orientation = .horizontal; sliderRow.spacing = 8
         restoreSlider = NSSlider(value: 50, minValue: 5, maxValue: 100, target: self, action: #selector(onSliderChanged(_:)))
-        restoreSlider.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        restoreSlider.widthAnchor.constraint(equalToConstant: 300).isActive = true
         restoreValueLabel = NSTextField(labelWithString: "50%")
-        restoreValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        restoreValueLabel.widthAnchor.constraint(equalToConstant: 48).isActive = true
         restoreValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         sliderRow.addArrangedSubview(restoreSlider)
         sliderRow.addArrangedSubview(restoreValueLabel)
-        root.addArrangedSubview(sliderRow)
 
-        // —— 安全提醒
-        root.addArrangedSubview(section(L("安全提醒")))
-        root.addArrangedSubview(wrapLabel(
-            L("关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。")
-            + L("但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。")
-            + L("离开座位前请手动锁屏（⌃⌘Q）。")))
+        // 缩进到与上方「策略」弹窗左缘对齐（标签 66 + 间距 12）
+        let alignedSlider = NSStackView(); alignedSlider.orientation = .horizontal; alignedSlider.spacing = 0
+        let pad = NSView(); pad.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        alignedSlider.addArrangedSubview(pad)
+        alignedSlider.addArrangedSubview(sliderRow)
 
-        // —— 开机自启
-        root.addArrangedSubview(section(L("启动")))
+        stack.addArrangedSubview(group(L("恢复后的亮度"), stackOf([
+            formRow(L("策略"), restorePop),
+            alignedSlider
+        ])))
+
+        return scrollable(stack)
+    }
+
+    // MARK: 热键
+    private func buildHotkeyTab() -> NSView {
+        let stack = column()
+
+        hkEnableBtn = NSButton(checkboxWithTitle: L("启用全局热键"), target: self, action: #selector(onHotkeyEnabledToggled(_:)))
+        hkRecorder = HotkeyRecorder(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
+        hkRecorder.bezelStyle = .rounded
+        hkRecorder.setButtonType(.momentaryPushIn)
+        hkRecorder.font = .systemFont(ofSize: 13)
+        hkRecorder.onCapture = { [weak self] mods, code in
+            guard let self else { return }
+            self.cfg.modFlags = mods
+            self.cfg.keyCode = code
+            self.commit()
+        }
+        hkRecorder.onClear = { [weak self] in
+            guard let self else { return }
+            self.cfg.modFlags = MOD_CTRL | MOD_ALT | MOD_CMD
+            self.cfg.keyCode = 11
+            self.commit()
+        }
+
+        hkStatusLabel = wrapLabel("")
+        let checkBtn = NSButton(title: L("运行自检"), target: self, action: #selector(onCheck(_:)))
+        let dfltBtn = NSButton(title: L("恢复默认"), target: self, action: #selector(onHotkeyReset(_:)))
+        let hkBtnRow = NSStackView(); hkBtnRow.orientation = .horizontal; hkBtnRow.spacing = 10
+        hkBtnRow.addArrangedSubview(dfltBtn)
+        hkBtnRow.addArrangedSubview(checkBtn)
+
+        stack.addArrangedSubview(group(L("恢复热键"), stackOf([
+            hkEnableBtn,
+            wrapLabel(L("关闭后只能用菜单栏点击操作。热键由系统级 Carbon 链路注册，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。")),
+            formRow(L("快捷键"), hkRecorder),
+            wrapLabel(L("点按上面的按钮，再直接按下新组合键即可；⌫ 清除，Esc 取消。系统级热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个。")),
+            hkBtnRow,
+            hkStatusLabel
+        ])))
+
+        // —— 兜底超时
+        timeoutPop = NSPopUpButton(frame: .zero, pullsDown: false)
+        timeoutPop.addItems(withTitles: timeoutChoices.map { $0.0 })
+        timeoutPop.target = self; timeoutPop.action = #selector(onTimeoutChanged(_:))
+        stack.addArrangedSubview(group(L("自动恢复兜底"), stackOf([
+            formRow(L("黑屏后"), timeoutPop),
+            wrapLabel(L("热键失效时的安全网。设为「不启用」则一直保持黑屏，直到手动恢复或退出本程序。"))
+        ])))
+
+        return scrollable(stack)
+    }
+
+    // MARK: 电池
+    private func buildBatteryTab() -> NSView {
+        let stack = column()
+
+        battSlider = NSSlider(value: 20, minValue: 0, maxValue: 100, target: self, action: #selector(onBatterySliderChanged(_:)))
+        battSlider.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        battValueLabel = NSTextField(labelWithString: "20%")
+        battValueLabel.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        battValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        battValueLabel.alignment = .right
+        let sliderRow = NSStackView(); sliderRow.orientation = .horizontal; sliderRow.spacing = 10
+        sliderRow.addArrangedSubview(battSlider)
+        sliderRow.addArrangedSubview(battValueLabel)
+
+        stack.addArrangedSubview(group(L("电量保护"), stackOf([
+            wrapLabel(L("使用电池且正在放电时，剩余电量降到这个数值就触发下面的动作。拖到 0 表示不限制。插着电源时完全不干预。")),
+            formRow(L("阈值"), sliderRow)
+        ])))
+
+        var actionViews: [NSView] = []
+        for a in BatteryAction.allCases {
+            let b = NSButton(radioButtonWithTitle: a.title, target: self, action: #selector(onBatteryActionSelected(_:)))
+            b.tag = a.rawValue
+            actionViews.append(b)
+            actionViews.append(indent(wrapLabel(a.detail)))
+            battActionBtns.append(b)
+        }
+        stack.addArrangedSubview(group(L("达到阈值后"), stackOf(actionViews)))
+
+        return scrollable(stack)
+    }
+
+    // MARK: 其他
+    private func buildMiscTab() -> NSView {
+        let stack = column()
+
         loginBtn = NSButton(checkboxWithTitle: L("登录时自动启动（菜单栏常驻）"), target: self, action: #selector(onLoginToggled(_:)))
-        root.addArrangedSubview(loginBtn)
         autoUpdateBtn = NSButton(checkboxWithTitle: L("自动检查更新"), target: self, action: #selector(onAutoUpdateToggled(_:)))
-        root.addArrangedSubview(autoUpdateBtn)
-        root.addArrangedSubview(wrapLabel(
-            L("后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。") +
-            L("请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。")))
+        stack.addArrangedSubview(group(L("启动"), stackOf([
+            loginBtn,
+            autoUpdateBtn,
+            wrapLabel(
+                L("后台每 24 小时查一次 GitHub 上的最新版本号；发现新版只在菜单栏打标，不弹窗打断。") +
+                L("请求只读取公开的版本号，不上传任何本机信息。手动「检查更新…」不受这个开关限制。"))
+        ])))
 
-        // —— 热键状态
-        root.addArrangedSubview(section(L("热键状态")))
-        permLabel = wrapLabel("")
-        root.addArrangedSubview(permLabel)
+        stack.addArrangedSubview(group(L("安全提醒"), stackOf([
+            wrapLabel(
+                L("关屏只是把背光调到 0，画面仍在渲染——这正是远程/屏幕共享仍能使用的原因。")
+                + L("但同样意味着：关屏期间任何能碰到键盘鼠标的人仍可操作这台机器，只是看不见画面。")
+                + L("离开座位前请手动锁屏（⌃⌘Q）。"))
+        ])))
 
-        let btnRow = NSStackView(); btnRow.orientation = .horizontal; btnRow.spacing = 10
-        checkBtn = NSButton(title: L("运行自检"), target: self, action: #selector(onCheck(_:)))
-        btnRow.addArrangedSubview(checkBtn)
-        root.addArrangedSubview(btnRow)
-
-        // 版本号放在底部：`关于`面板之外，用户反馈问题时能一眼报出版本
         let ver = NSTextField(labelWithString: "LidKeep v\(LK_VERSION)  (\(LK_COMMIT))")
         ver.font = .systemFont(ofSize: 11)
         ver.textColor = .tertiaryLabelColor
-        root.addArrangedSubview(ver)
+        let ghBtn = NSButton(title: L("在 GitHub 上查看"), target: self, action: #selector(onOpenGitHub(_:)))
+        stack.addArrangedSubview(group(L("关于"), stackOf([ver, ghBtn])))
 
-        root.addArrangedSubview(NSView())
-        return w
+        return scrollable(stack)
     }
 
     // MARK: 构建辅助
-    private func section(_ t: String) -> NSTextField {
-        let l = NSTextField(labelWithString: t)
-        l.font = .systemFont(ofSize: 13, weight: .semibold)
-        return l
+    private func tabItem(_ label: String, _ view: NSView) -> NSTabViewItem {
+        let it = NSTabViewItem(identifier: label as NSString)
+        it.label = label
+        it.view = view
+        return it
     }
-    /// 换行标签必须显式指定宽度，否则 intrinsicContentSize 会把栈撑得比窗口还宽
+    private func column() -> NSStackView {
+        let s = NSStackView()
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 16
+        s.translatesAutoresizingMaskIntoConstraints = false
+        return s
+    }
+    private func stackOf(_ views: [NSView]) -> NSStackView {
+        let s = NSStackView()
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 8
+        s.translatesAutoresizingMaskIntoConstraints = false
+        for v in views { s.addArrangedSubview(v) }
+        return s
+    }
+    /// 分组盒：标题 + 边框，macOS 系统设置的标准观感，比一排加粗小标题清楚得多
+    private func group(_ title: String, _ content: NSStackView) -> NSBox {
+        let box = NSBox()
+        box.title = title
+        box.titlePosition = .atTop
+        box.boxType = .primary
+        box.contentViewMargins = NSSize(width: 14, height: 12)
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.contentView!.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: box.contentView!.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: box.contentView!.trailingAnchor),
+            content.topAnchor.constraint(equalTo: box.contentView!.topAnchor),
+            content.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor)
+        ])
+        return box
+    }
+    /// 可滚动容器。内容比可视区高时出现滚动条，比可视区矮时钉在顶部（靠 FlippedView）。
+    private func scrollable(_ stack: NSStackView) -> NSScrollView {
+        let sv = NSScrollView()
+        sv.hasVerticalScroller = true
+        sv.hasHorizontalScroller = false
+        sv.drawsBackground = false
+        sv.borderType = .noBorder
+        sv.autoresizingMask = [.width, .height]
+        let holder = FlippedView()
+        holder.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(stack)
+        sv.documentView = holder
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: holder.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -16),
+            // 文档视图宽度跟随可视区：分组盒才能撑满整列
+            holder.widthAnchor.constraint(equalTo: sv.contentView.widthAnchor)
+        ])
+        // 所有分组盒等宽——扫视时左缘成一条线，而不是各自缩成一团
+        for v in stack.arrangedSubviews where v is NSBox {
+            v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return sv
+    }
+    /// 换行标签。只设 preferredMaxLayoutWidth，不锁死宽度，
+    /// 让它在分组盒里自然撑开（锁死宽度时窗口缩放会露馅）。
     private func wrapLabel(_ text: String) -> NSTextField {
         let l = NSTextField(wrappingLabelWithString: text)
         l.font = .systemFont(ofSize: 11)
         l.textColor = .secondaryLabelColor
-        l.preferredMaxLayoutWidth = 410
-        l.widthAnchor.constraint(equalToConstant: 410).isActive = true
+        // 宽度必须显式钉死：只给 preferredMaxLayoutWidth 时，NSBox 里的高度
+        // 按这个宽度算、实际宽度却由盒子决定，两者不一致就会把最后一行裁掉。
+        l.preferredMaxLayoutWidth = 440
+        l.widthAnchor.constraint(equalToConstant: 440).isActive = true
         return l
     }
     /// 把说明文字缩进到与选项标题对齐（选项文字本身是从圆圈之后开始的）
@@ -1179,44 +1477,51 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         s.addArrangedSubview(pad); s.addArrangedSubview(view)
         return s
     }
-    private func row(_ label: String, _ view: NSView) -> NSStackView {
-        let s = NSStackView(); s.orientation = .horizontal; s.spacing = 10
+    /// 左标签 + 右控件。标签定宽右对齐，控件左对齐——扫视时控件成一条线。
+    private func formRow(_ label: String, _ view: NSView) -> NSStackView {
+        let s = NSStackView(); s.orientation = .horizontal; s.spacing = 12
+        s.alignment = .firstBaseline
         let l = NSTextField(labelWithString: label)
         l.font = .systemFont(ofSize: 12)
-        l.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        l.textColor = .labelColor
+        l.widthAnchor.constraint(equalToConstant: 66).isActive = true
         l.alignment = .right
-        s.addArrangedSubview(l); s.addArrangedSubview(view)
-        view.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        s.addArrangedSubview(l)
+        s.addArrangedSubview(view)
         return s
     }
 
     // MARK: 同步
     func syncFromConfig() {
         cfg = ctl.cfg
-        for (flag, b) in modBtns { b.state = (cfg.modFlags & flag != 0) ? .on : .off }
-        keyPop.selectItem(at: keyItems.firstIndex { $0.1 == cfg.keyCode } ?? 1)
-        hkLabel.stringValue = L("当前: ") + hotkeyText(cfg) + L("　（设置即时生效）")
-        timeoutPop.selectItem(at: timeoutChoices.firstIndex { $0.1 == cfg.timeout }
+        hkEnableBtn?.state = cfg.hotkeyEnabled ? .on : .off
+        hkRecorder?.displayText = hotkeyText(cfg)
+        hkRecorder?.isEnabled = cfg.hotkeyEnabled
+        timeoutPop?.selectItem(at: timeoutChoices.firstIndex { $0.1 == cfg.timeout }
                               ?? timeoutChoices.firstIndex { $0.1 == 43200 }!)
+
         let floor = cfg.batteryFloor
-        batteryPop.selectItem(at: batteryChoices.firstIndex { $0.1 == floor }
-                              ?? batteryChoices.firstIndex { $0.1 == 20 }!)
+        battSlider?.intValue = Int32(floor)
+        battValueLabel?.stringValue = floor == 0 ? L("不限制") : "\(floor)%"
+        let action = BatteryAction(rawValue: cfg.batteryAction) ?? .restoreOnly
+        for b in battActionBtns { b.state = (b.tag == action.rawValue) ? .on : .off }
+
         let fixed = cfg.restoreFixed
-        restorePop.selectItem(at: fixed == nil ? 0 : 1)
-        restoreSlider.isEnabled = fixed != nil
-        restoreSlider.doubleValue = Double((fixed ?? 0.5) * 100)
-        restoreValueLabel.stringValue = "\(Int(restoreSlider.doubleValue))%"
-        loginBtn.state = isLoginItemEnabled() ? .on : .off
-        autoUpdateBtn.state = cfg.autoCheckUpdate ? .on : .off
+        restorePop?.selectItem(at: fixed == nil ? 0 : 1)
+        restoreSlider?.isEnabled = fixed != nil
+        restoreSlider?.doubleValue = Double((fixed ?? 0.5) * 100)
+        restoreValueLabel?.stringValue = "\(Int(restoreSlider?.doubleValue ?? 50))%"
+        loginBtn?.state = isLoginItemEnabled() ? .on : .off
+        autoUpdateBtn?.state = cfg.autoCheckUpdate ? .on : .off
         syncNosleep()
         // 运行模式：由底层三个布尔推导，因此不存在「面板与真实状态不一致」
         let mode = currentPowerMode(cfg)
         for (i, pm) in PowerMode.allCases.enumerated() where i < modeBtns.count {
             modeBtns[i].state = (pm == mode) ? .on : .off
         }
-        lidBlackoutBtn.state = cfg.lidBlackout ? .on : .off
+        lidBlackoutBtn?.state = cfg.lidBlackout ? .on : .off
         // 熄屏由合盖守护执行，守护没开时这一项无从生效——禁用，避免「勾了却没反应」
-        lidBlackoutBtn.isEnabled = ctl.lidOn
+        lidBlackoutBtn?.isEnabled = ctl.lidOn
         refreshPerm()
     }
 
@@ -1302,33 +1607,36 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
     }
     private func refreshPerm() {
         let c = ctl.cfg
-        permLabel.stringValue = ctl.hotkeyReady
-            ? ("\(hotkeyText(c))" + L("：✅ 已注册为系统全局热键。本程序走系统级热键链路，不需要「辅助功能 / 输入监控」授权，也不会因重装 App 而失效。"))
+        guard hkEnableBtn.state == .on else {
+            hkStatusLabel.stringValue = L("已按设置停用全局热键，仅能从菜单栏点击操作。")
+            return
+        }
+        hkStatusLabel.stringValue = ctl.hotkeyReady
+            ? ("\(hotkeyText(c))" + L("：✅ 已注册为系统全局热键"))
             : ("\(hotkeyText(c))" + L("：⚠️ ") + "\(carbonStatusText(ctl.lastHotkeyStatus))" + L("。请换一个组合（建议 ⇧⌘B 或 ⌃⌥⌘B）。"))
     }
 
     // MARK: 事件
-    @objc private func onHotkeyChanged(_ sender: Any?) {
-        var flags: UInt64 = 0
-        for (flag, b) in modBtns where b.state == .on { flags |= flag }
-        // 系统全局热键必须带至少一个修饰键，否则 RegisterEventHotKey 会失败
-        guard flags != 0 else {
-            let a = NSAlert(); a.alertStyle = .warning
-            a.messageText = L("需要修饰键")
-            a.informativeText = L("系统级全局热键必须包含 ⌘ / ⌃ / ⌥ / ⇧ 中的至少一个，不能只用一个普通键。")
-            a.addButton(withTitle: L("好")); a.runModal()
-            syncFromConfig(); return
-        }
-        cfg.modFlags = flags
-        cfg.keyCode = keyItems[keyPop.indexOfSelectedItem].1
+    @objc private func onHotkeyEnabledToggled(_ sender: Any?) {
+        cfg.hotkeyEnabled = (hkEnableBtn.state == .on)
+        commit()
+    }
+    @objc private func onHotkeyReset(_ sender: Any?) {
+        cfg.modFlags = MOD_CTRL | MOD_ALT | MOD_CMD
+        cfg.keyCode = 11
         commit()
     }
     @objc private func onTimeoutChanged(_ sender: Any?) {
         cfg.timeout = timeoutChoices[timeoutPop.indexOfSelectedItem].1
         commit()
     }
-    @objc private func onBatteryChanged(_ sender: Any?) {
-        cfg.batteryFloor = batteryChoices[batteryPop.indexOfSelectedItem].1
+    @objc private func onBatterySliderChanged(_ sender: Any?) {
+        cfg.batteryFloor = Int(battSlider.intValue)
+        battValueLabel.stringValue = cfg.batteryFloor == 0 ? L("不限制") : "\(cfg.batteryFloor)%"
+        commit()
+    }
+    @objc private func onBatteryActionSelected(_ sender: NSButton) {
+        cfg.batteryAction = sender.tag
         commit()
     }
     @objc private func onRestoreModeChanged(_ sender: Any?) {
@@ -1348,15 +1656,18 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         // 立刻检查一次：让「打开开关」这个动作有即时反馈，而不是等下一个 24h 周期
         AppDelegate.shared?.checkUpdateSilently()
     }
+    @objc private func onOpenGitHub(_ sender: Any?) {
+        if let u = URL(string: "https://github.com/Mihooni/lidkeep") {
+            NSWorkspace.shared.open(u)
+        }
+    }
     private func commit() {
         saveConfig(cfg)
         ctl.cfg = cfg
         ctl.reloadHotkey()
-        if ctl.blacked {
-            ctl.scheduleTimeout()
-            ctl.scheduleBatteryGuard()
-        }
-        hkLabel.stringValue = L("当前: ") + hotkeyText(cfg) + L("　（设置即时生效）")
+        if ctl.blacked { ctl.scheduleTimeout() }
+        ctl.scheduleBatteryGuard()
+        syncFromConfig()
         AppDelegate.shared?.refreshUI()
     }
 
@@ -1454,7 +1765,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 交给 AppKit 原生弹出菜单（左键/右键都弹），点击不再直接开关显示器
         statusItem.menu = menu
         // 热键走 Carbon 链路，不依赖辅助功能授权；这里只反映注册结果
-        hotkeyUnavailable = !ctl.hotkeyReady
+        hotkeyUnavailable = ctl.cfg.hotkeyEnabled && !ctl.hotkeyReady
         refreshUI()
 
         // 自动检查更新：启动 20 秒后先来一次（避开启动瞬间的磁盘/网络争用），此后每 6 小时
@@ -1610,7 +1921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func ensureHotkey() {
         guard !ctl.hotkeyReady else { return }
         ctl.installHotkey()
-        hotkeyUnavailable = !ctl.hotkeyReady
+        hotkeyUnavailable = ctl.cfg.hotkeyEnabled && !ctl.hotkeyReady
         refreshUI()
     }
     func menuWillOpen(_ menu: NSMenu) { ensureHotkey() }
@@ -1722,7 +2033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.title = "⏳"
         ctl.selfTest { [weak self] ok in
             DispatchQueue.main.async {
-                self?.hotkeyUnavailable = !(self?.ctl.hotkeyReady ?? false)
+                self?.hotkeyUnavailable = (self?.ctl.cfg.hotkeyEnabled ?? true) && !(self?.ctl.hotkeyReady ?? false)
                 self?.refreshUI()
                 let a = NSAlert()
                 a.alertStyle = ok ? .informational : .warning

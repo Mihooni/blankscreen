@@ -122,6 +122,10 @@ struct Config: Codable {
     var timeout: Double = 43200                              // 一次性模式安全兜底，秒；0 = 不限
     var restoreFixed: Float? = nil                           // nil = 恢复进入黑屏前的亮度
     var batteryFloor: Int = 20                               // 电量下限 %，0 = 不限制
+    /// 触底时做什么，见 BatteryAction；0 = 只恢复屏幕。由菜单栏 App 使用，CLI 必须镜像。
+    var batteryAction: Int = 0
+    /// 是否注册全局热键。由菜单栏 App 使用，CLI 必须镜像。
+    var hotkeyEnabled: Bool = true
     var autoNosleep: Bool = false                            // 关屏时同时防睡眠（默认关：合盖不睡有耗电风险）
     // 合盖不睡眠长期模式：菜单栏 App 菜单一键管理
     var lidAwake: Bool = false
@@ -139,7 +143,7 @@ struct Config: Codable {
     var autoCheckUpdate: Bool = true
     var lastUpdateCheckAt: Double = 0
 
-    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt }
+    enum CodingKeys: String, CodingKey { case keyCode, modFlags, timeout, restoreFixed, batteryFloor, batteryAction, autoNosleep, lidAwake, lidBlackout, lang, keepDisplayOn, schemaVersion, autoCheckUpdate, lastUpdateCheckAt, hotkeyEnabled }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -148,6 +152,8 @@ struct Config: Codable {
         timeout = try c.decodeIfPresent(Double.self, forKey: .timeout) ?? 43200
         restoreFixed = try c.decodeIfPresent(Float.self, forKey: .restoreFixed)
         batteryFloor = try c.decodeIfPresent(Int.self, forKey: .batteryFloor) ?? 20
+        batteryAction = try c.decodeIfPresent(Int.self, forKey: .batteryAction) ?? 0
+        hotkeyEnabled = try c.decodeIfPresent(Bool.self, forKey: .hotkeyEnabled) ?? true
         autoNosleep = try c.decodeIfPresent(Bool.self, forKey: .autoNosleep) ?? false
         lidAwake = try c.decodeIfPresent(Bool.self, forKey: .lidAwake) ?? false
         lidBlackout = try c.decodeIfPresent(Bool.self, forKey: .lidBlackout) ?? true
@@ -2123,6 +2129,22 @@ case "config":
             }
             i += 2
         }
+        else if args[i] == "--battery-action", i + 1 < args.count {
+            if let v = Int(args[i + 1]), (0...2).contains(v) {
+                c.batteryAction = v
+            } else {
+                print((L("错误：--battery-action 需要 0 / 1 / 2（0=恢复屏幕，1=恢复并撤销防睡眠，2=只提醒），收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            i += 2
+        }
+        else if args[i] == "--hotkey", i + 1 < args.count {
+            let v = args[i + 1].lowercased()
+            guard ["on", "off", "true", "false"].contains(v) else {
+                print((L("错误：--hotkey 需要 on / off，收到: ") + "\(args[i + 1])")); exit(1)
+            }
+            c.hotkeyEnabled = (v == "on" || v == "true")
+            i += 2
+        }
         else if args[i] == "--auto-nosleep" { c.autoNosleep = true; i += 1 }
         else if args[i] == "--lang", i + 1 < args.count {
             let v = args[i + 1].lowercased()
@@ -2152,6 +2174,11 @@ case "config":
     print((L("  一次性模式超时: ") + "\(Int(c.timeout))" + L(" 秒（") + "\(String(format: "%.1f", c.timeout / 3600))" + L(" 小时，0 = 不限）")))
     print((L("  恢复亮度: ") + "\(c.restoreFixed.map { String(format: L("固定 %.0f%%"), $0 * 100) } ?? L("进入黑屏前的亮度"))"))
     print((L("  电量下限: ") + "\(c.batteryFloor > 0 ? ("\(c.batteryFloor)" + L("%（电池供电且放电时，低于此值拒绝关屏并自动恢复）")) : L("不限制"))"))
+    let actName = c.batteryAction == 1 ? L("恢复屏幕并撤销防睡眠（回到原本的电池行为）")
+                : c.batteryAction == 2 ? L("只提醒，不自动干预")
+                : L("恢复屏幕，继续防睡眠")
+    print((L("  电量触底动作: ") + "\(actName)"))
+    print((L("  全局热键: ") + "\(c.hotkeyEnabled ? L("启用") : L("停用（只能从菜单栏点击）"))"))
     print((L("  关屏联动防睡眠: ") + "\(c.autoNosleep ? L("开（黑屏期间阻止系统睡眠，恢复显示时自动复位）") : L("关"))"))
     let langName = c.lang == "auto" ? L("跟随系统") : (c.lang == "zh" ? L("中文") : L("英文"))
     print((L("  界面语言: ") + "\(langName)" + L("（--lang auto/zh/en）")))

@@ -79,6 +79,21 @@ $B config --battery "$orig" >/dev/null 2>&1
 back=$(json_batt)
 [ "${back:-}" = "$orig" ] && ok "配置已复原（${orig}）" || bad "配置未能复原（读到 ${back:-空}）"
 
+# 菜单栏 App 与 CLI 共写同一个 config.json：任一端漏了某个字段的 CodingKeys，
+# 另一端写盘时就会把它静默抹掉。这个坑踩过两回（lidBlackout、自动更新字段），
+# 所以每次新增配置字段都必须在这里加一条往返断言。
+json_raw() { [ -f "$CFG" ] || return 0; tr -d ' \n\t' < "$CFG" 2>/dev/null | grep -o "\"$1\":[^,}]*" | head -1 | sed "s/\"$1\"://"; }
+orig_act=$(json_raw batteryAction); orig_act=${orig_act:-0}
+orig_hk=$(json_raw hotkeyEnabled);  orig_hk=${orig_hk:-true}
+$B config --battery-action 1 --hotkey off >/dev/null 2>&1
+[ "$(json_raw batteryAction)" = "1" ] && ok "电量触底动作已写入" || bad "电量触底动作未写入（读到 $(json_raw batteryAction)）"
+[ "$(json_raw hotkeyEnabled)" = "false" ] && ok "全局热键开关已写入" || bad "全局热键开关未写入（读到 $(json_raw hotkeyEnabled)）"
+# 换个字段再写一次盘：上面两个值必须还在
+$B config --battery 45 >/dev/null 2>&1
+[ "$(json_raw batteryAction)" = "1" ] && ok "CLI 再次写盘后 batteryAction 仍在" || bad "CLI 写盘抹掉了 batteryAction"
+[ "$(json_raw hotkeyEnabled)" = "false" ] && ok "CLI 再次写盘后 hotkeyEnabled 仍在" || bad "CLI 写盘抹掉了 hotkeyEnabled"
+$B config --battery "$orig" --battery-action "$orig_act" --hotkey "$orig_hk" >/dev/null 2>&1
+
 # ---------- 4. 电量保护 ----------
 echo
 echo "【4】电量保护（模拟电池 10% 放电中）"
