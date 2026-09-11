@@ -89,6 +89,12 @@ func migrateLegacyUserState() {
         if fm.fileExists(atPath: logPath) { try? fm.removeItem(atPath: legacyLog) }
         else { try? fm.moveItem(atPath: legacyLog, toPath: logPath) }
     }
+    // 旧版若开着「登录时启动」，更名后必须替它把新 label 的登录项写回来，否则这个
+    // 设置会在改名的同时静默失效，用户只能自己重新勾一次。
+    // 只写 plist、不 bootstrap：本进程已经在运行，立刻 bootstrap 会拉起第二个实例
+    // 去和单实例接管逻辑抢；macOS 下次登录会自动加载 LaunchAgents 下的 plist，
+    // 语义与「登录时启动」完全一致。
+    let wasLoginItem = fm.fileExists(atPath: home + "/Library/LaunchAgents/com.blankscreen.bar.plist")
     for l in ["com.blankscreen.bar", "com.blankscreen.agent"] {
         let p = home + "/Library/LaunchAgents/\(l).plist"
         guard fm.fileExists(atPath: p) else { continue }
@@ -101,6 +107,9 @@ func migrateLegacyUserState() {
         try? t.run()
         t.waitUntilExit()
         try? fm.removeItem(atPath: p)
+    }
+    if wasLoginItem, !fm.fileExists(atPath: barPlist) {
+        try? loginItemPlist().write(toFile: barPlist, atomically: true, encoding: .utf8)
     }
 }
 
