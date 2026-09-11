@@ -25,3 +25,7 @@ blctl
 
 # 构建时由 Makefile 生成（版本与 commit 注入），不应入库
 Sources/Shared/Version.swift
+
+# 推广素材采集的中间产物：整屏截图与录屏含完整桌面内容，绝不入库
+# （成品 menu.png / settings.png / demo.gif 是裁剪过的，正常提交）
+docs/promo/.*
