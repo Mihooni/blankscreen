@@ -1414,12 +1414,21 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
         for v in views { s.addArrangedSubview(v) }
         return s
     }
-    /// 分组盒：标题 + 边框，macOS 系统设置的标准观感，比一排加粗小标题清楚得多
-    private func group(_ title: String, _ content: NSStackView) -> NSBox {
+    /// 分组：小节标题放在盒外（13pt 半粗、主色），内容装进圆角填充卡片。
+    /// 这是 macOS 系统设置（Ventura 起）的分组观感——默认 NSBox 把标题以 11pt 灰字
+    /// 嵌进边框缺口，和卡片内的 11pt 说明文字几乎同一视觉重量，扫视时抓不到重点。
+    private func group(_ title: String, _ content: NSStackView) -> NSView {
+        let header = NSTextField(labelWithString: title)
+        header.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.textColor = .labelColor
+        header.translatesAutoresizingMaskIntoConstraints = false
+
         let box = NSBox()
-        box.title = title
-        box.titlePosition = .atTop
-        box.boxType = .primary
+        box.boxType = .custom
+        box.titlePosition = .noTitle
+        box.fillColor = NSColor.systemGray.withAlphaComponent(0.18)  // 深/浅主题下都比背景深一档，但不抢内容
+        box.borderWidth = 0
+        box.cornerRadius = 10
         box.contentViewMargins = NSSize(width: 14, height: 12)
         box.translatesAutoresizingMaskIntoConstraints = false
         box.contentView!.addSubview(content)
@@ -1429,7 +1438,14 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             content.topAnchor.constraint(equalTo: box.contentView!.topAnchor),
             content.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor)
         ])
-        return box
+
+        let s = NSStackView(views: [header, box])
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 6
+        s.translatesAutoresizingMaskIntoConstraints = false
+        box.widthAnchor.constraint(equalTo: s.widthAnchor).isActive = true
+        return s
     }
     /// 可滚动容器。内容比可视区高时出现滚动条，比可视区矮时钉在顶部（靠 FlippedView）。
     private func scrollable(_ stack: NSStackView) -> NSScrollView {
@@ -1451,8 +1467,8 @@ final class SettingsPanel: NSObject, NSWindowDelegate {
             // 文档视图宽度跟随可视区：分组盒才能撑满整列
             holder.widthAnchor.constraint(equalTo: sv.contentView.widthAnchor)
         ])
-        // 所有分组盒等宽——扫视时左缘成一条线，而不是各自缩成一团
-        for v in stack.arrangedSubviews where v is NSBox {
+        // 所有分组等宽——扫视时左缘成一条线，而不是各自缩成一团
+        for v in stack.arrangedSubviews {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         return sv
