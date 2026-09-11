@@ -63,6 +63,19 @@ The lid mode runs on its own daemon, so it survives an app restart; the two disp
 
 ## Up and running in 30 seconds
 
+One line, if you'd rather not think about it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
+```
+
+It looks up the latest release, downloads (falling back to a mirror if GitHub is
+slow), checks the SHA256 against the published `SHA256SUMS`, installs to
+`/Applications`, clears the quarantine flag, drops in the CLI and launches the app.
+Want to read it before running it? Drop the `| bash` and open the file.
+
+Or, with Homebrew:
+
 ```bash
 brew install --cask mihooni/tap/lidkeep
 xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # one-time, while unsigned

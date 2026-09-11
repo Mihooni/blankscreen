@@ -63,6 +63,18 @@ $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 
 ## 30 秒上手
 
+不想折腾的话，一行命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mihooni/lidkeep/main/install-remote.sh | bash
+```
+
+脚本会查最新版本、下载（GitHub 慢会自动换镜像）、比对 `SHA256SUMS`、装到
+`/Applications`、清掉隔离标记、顺手装好 CLI，然后启动。
+想先看清楚再跑？去掉 `| bash` 存成文件打开看一眼就行。
+
+或者用 Homebrew：
+
 ```bash
 brew install --cask mihooni/tap/lidkeep
 xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # 未公证期间需执行一次
