@@ -63,6 +63,13 @@ $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 
 ## 30 秒上手
 
+```bash
+brew install --cask mihooni/tap/lidkeep
+xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # 未公证期间需执行一次
+```
+
+或者手动安装：
+
 1. 从 [Releases](../../releases/latest) 下载 `LidKeep-<版本>.dmg`
 2. 打开，把 App 拖进 Applications
 3. 点菜单栏的 ☀ 图标 → **关闭显示器**
@@ -129,7 +136,17 @@ $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 
 ## 安装
 
-**方式 A —— 安装包（推荐）**：从 [Releases](../../releases/latest) 下载
+**方式 A —— Homebrew**：一条命令，日后升级也最省事：
+
+```bash
+brew install --cask mihooni/tap/lidkeep
+xattr -dr com.apple.quarantine "/Applications/LidKeep.app"   # 目前必须，原因见下
+```
+
+tap 仓库在 [Mihooni/homebrew-tap](https://github.com/Mihooni/homebrew-tap)。
+第二行不是可选项，见 [Gatekeeper 与未签名构建](#gatekeeper-与未签名构建)。
+
+**方式 B —— 安装包**：从 [Releases](../../releases/latest) 下载
 `LidKeep-<版本号>.pkg`，双击即可，一步装好两项：
 
 | 安装位置 | 内容 |
@@ -137,14 +154,16 @@ $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 | `/Applications/LidKeep.app` | 菜单栏 App |
 | `/usr/local/bin/lidkeep` | 命令行工具 |
 
-安装器会自动清除 Gatekeeper 隔离标记并启动 App，无需任何手工操作。
+安装器会清除 **App** 的隔离标记并启动 App。但还有一道更早的门：`.pkg` 自身未用付费证书签名，
+若 macOS 拒绝打开它（提示"身份不明的开发者"），对 `.pkg` 右键 → **打开** 并确认一次即可。
+这是唯一需要手工的一步，且只在首次安装时出现。
 
-**方式 A2 —— DMG 拖拽安装**：从 [Releases](../../releases/latest) 下载
+**方式 C —— DMG 拖拽安装**：从 [Releases](../../releases/latest) 下载
 `LidKeep-<版本号>.dmg`，打开后把 App 拖进 Applications 文件夹；
 双击镜像里的「Install Command-Line Tool.command」可顺手装好 CLI（弹一次系统密码框）。
 若 App 首次打开被 Gatekeeper 拦下，右键 → **打开** 即可。
 
-**方式 B —— 源码构建**（需 Xcode Command Line Tools）：
+**方式 D —— 源码构建**（需 Xcode Command Line Tools）：
 
 ```bash
 git clone https://github.com/Mihooni/lidkeep.git
@@ -154,7 +173,7 @@ cd lidkeep
 
 `./install.sh --cli-only` 可只装命令行工具。`make pkg` 可在本地生成同样的安装包。
 
-**方式 C —— 下载预编译包**：从 [Releases](../../releases/latest) 下载 zip，然后：
+**方式 E —— 下载预编译包**：从 [Releases](../../releases/latest) 下载 zip，然后：
 
 ```bash
 xattr -dr com.apple.quarantine LidKeep.app   # 清除 Gatekeeper 隔离标记
@@ -162,9 +181,49 @@ cp -R LidKeep.app /Applications/
 # Apple 芯片: sudo cp lidkeep /opt/homebrew/bin/   |   Intel: sudo cp lidkeep /usr/local/bin/
 ```
 
-> **未使用付费开发者证书签名。** macOS 可能拒绝打开下载来的 `.pkg`（提示"身份不明的开发者"）。
-> 此时对 `.pkg` 右键 → **打开**，再确认即可。App 首次启动同理 —— 不过安装器已自动清除了
-> App 的隔离标记，装完直接就能正常打开。
+### Gatekeeper 与未签名构建
+
+这是目前唯一的粗糙之处，装之前值得先了解一下。
+
+Release 产物用的是 **ad-hoc 临时签名，未经公证**（本项目没有付费 Apple 开发者证书），
+所以 Gatekeeper 会把下载来的副本视为不可信。在 macOS 26 上实测：
+
+| 途径 | Gatekeeper 的实际行为 |
+|---|---|
+| 直接下载（`.pkg` / `.dmg` / zip） | `spctl` 对安装包**和** App 均判定 `rejected` |
+| `brew install --cask` | Homebrew **自己**会打上隔离标记，App 同样被判定 `rejected` |
+| 打开带隔离标记的副本 | 系统拒绝打开，**并可能直接把 App 移进废纸篓** |
+
+Homebrew 在这里帮不上忙：`--no-quarantine` 在 Homebrew 6 中已不存在，cask 也无法替用户
+放弃隔离标记。所以上面每条路径都需要一次手工操作：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/LidKeep.app
+```
+
+手动下载 `.dmg` / `.pkg` 的话，也可以改成对文件右键 → **打开**，确认一次即可。
+
+**真正的解法是公证** —— Developer ID 签名加公证票据。做完之后上述所有路径都会变成
+普通双击，这是下个版本的最高优先级。在此之前，每个 Release 都会附带 `SHA256SUMS`
+与 GitHub 构建来源证明（SLSA），你可以自行核验下载物确实出自本仓库。
+
+### 中国大陆下载
+
+`github.com` 的 Release 二进制资产在国内经常完全不可达——实测**10 秒下载 0 字节**，
+而同一域名体系下的 `api.github.com` 与 `raw.githubusercontent.com` 都正常。这是 CDN 层面的
+阻断，与本项目无关。
+
+在 Release 链接前加 `https://gh-proxy.com/` 即可走镜像。已实测与官方产物**逐字节一致**
+（SHA-256 相符、长度完整），速度约 **173 KB/s**：
+
+```bash
+V=2.2.0
+curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
+shasum -a 256 "LidKeep-$V.dmg"   # 必须与 Release 里的 SHA256SUMS 一致
+```
+
+`gh-proxy.com` 是第三方加速服务，不受本项目控制，可能变化或失效。安装前务必核对
+`SHA256SUMS`；能直连时优先用官方地址。
 
 ### 从更早版本升级
 
