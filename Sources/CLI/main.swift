@@ -78,16 +78,22 @@ func migrateLegacyUserState() {
     }
 }
 
-/// 旧版本系统级 / 应用级残留的只读清单。删除它们需要 root 或卸载 App，
-/// 因此 doctor 只负责报告，由用户显式执行 `lidkeep nosleep uninstall-helper` 清理。
-func legacyLeftovers() -> [String] {
+/// 旧版本的系统级残留（删除它们需要 root）。uninstall-helper 用它判断
+/// 是否值得提权 —— 只看「新版助手是否存在」会让旧残留永远清不掉。
+func legacySystemLeftovers() -> [String] {
     [
         "/Library/PrivilegedHelperTools/com.blankscreen.pmset",
         "/etc/sudoers.d/blankscreen",
         "/Library/LaunchDaemons/com.blankscreen.nosleep.reset.plist",
         "/var/db/blankscreen-nosleep",
-        "/Applications/BlankScreenBar.app",
     ].filter { fm.fileExists(atPath: $0) }
+}
+
+/// 旧版本残留的完整只读清单（含用户级的旧 App）。doctor 只负责报告，
+/// 清理由用户显式执行 `lidkeep nosleep uninstall-helper` 与删除旧 App 完成。
+func legacyLeftovers() -> [String] {
+    legacySystemLeftovers()
+        + (fm.fileExists(atPath: "/Applications/BlankScreenBar.app") ? ["/Applications/BlankScreenBar.app"] : [])
 }
 
 migrateLegacyUserState()
@@ -2090,7 +2096,12 @@ case "nosleep":
         exit(ok ? 0 : 1)
 
     case "uninstall-helper":
-        if !helperInstalled() { print(L("提权助手未安装")); exit(0) }
+        // 新版助手没装、但存在旧版残留时同样要跑一遍卸载脚本：脚本本身负责清掉旧版
+        // BlankScreen 的 helper / sudoers / LaunchDaemon / 持有者账本，并复位系统级
+        // 防睡眠。只按「新版助手是否存在」提前返回，旧残留将永远无法被本命令清掉。
+        let legacySys = legacySystemLeftovers()
+        if !helperInstalled() && legacySys.isEmpty { print(L("提权助手未安装")); exit(0) }
+        if !helperInstalled() { print(L("未检测到新版助手，将清理旧版 BlankScreen 的系统级残留")) }
         // 先关掉正在运行的防睡眠，再卸载（顺序反了就再也无法复位）
         if let pid = nosleepPid() { kill(pid, SIGTERM); _ = waitUntil(timeout: 5.0) { nosleepPid() == nil } }
         let (ok, out) = runAsAdmin(uninstallHelperScript())

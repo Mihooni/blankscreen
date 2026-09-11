@@ -544,6 +544,7 @@ let L10nTable: [String: String] = [
     "     → 这些与本程序无关；若要让 Mac 恢复自动睡眠，需到对应应用里关闭。": "     -> These are not from this app; turn them off in the owning app to let the Mac sleep again.",
     "  ⚠️  配置要求防睡眠，但当前没有任何断言在生效中（黑屏时才会起断言）": "  [warn] Settings ask to prevent sleep, but no assertion is active right now (it starts when the display is blanked)",
     "防睡眠未生效": "Sleep prevention not in effect",
+    "未检测到新版助手，将清理旧版 BlankScreen 的系统级残留": "No helper from this build; cleaning up the old BlankScreen system-level leftovers",
     // v2.0.0 更名迁移：旧版 BlankScreen 残留报告
     "\n【更名残留】": "\n[Legacy leftovers]",
     "BlankScreen 旧版残留": "BlankScreen legacy leftovers",
