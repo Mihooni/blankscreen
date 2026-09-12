@@ -17,6 +17,14 @@ $ lidkeep off      # screen goes black, system keeps running
 $ lidkeep on       # display restored (also works over SSH)
 ```
 
+## What's new in 2.2.1
+
+- **Settings, rebuilt** — four tabs (General / Hotkey / Battery / Other), each scrollable, with card-style sections you can find at a glance.
+- **Record any hotkey** — click the recorder and press the combination you want. No modifier checkboxes, no preset key list, and the global hotkey can be switched off entirely.
+- **Battery floor, your way** — a 0–100% slider instead of six presets, plus a choice of what happens when it's hit: restore the display / restore **and** release anti-sleep so the Mac behaves the way it normally does on battery / just notify me.
+
+v2.2.0 added quiet background update checks — a `⬆` badge in the menu bar, never a dialog.
+
 ## Sound familiar?
 
 | # | Situation | What usually happens |
@@ -236,7 +244,7 @@ mirror. This was verified byte-identical to the official artifact (matching SHA-
 full length) at roughly **173 KB/s**:
 
 ```bash
-V=2.2.0
+V=2.2.1
 curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # must match SHA256SUMS from the release
 ```

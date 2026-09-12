@@ -12,7 +12,7 @@
 set -u
 
 REPO="Mihooni/lidkeep"
-DEFAULT_VERSION="2.2.0"
+DEFAULT_VERSION="2.2.1"
 # 实测（2026-09-11，中国大陆）：直连 GitHub Release 资产 10 秒 0 字节，
 # gh-proxy.com 173 KB/s 且 SHA256 与官方 SHA256SUMS 逐字节一致，故作为首选回退。
 MIRRORS=(

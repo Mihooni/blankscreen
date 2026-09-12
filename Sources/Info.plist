@@ -7,8 +7,8 @@
     <key>CFBundleName</key>                <string>LidKeep</string>
     <key>CFBundleDisplayName</key>         <string>LidKeep</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
-    <key>CFBundleShortVersionString</key>  <string>2.2.0</string><!--VERSION-->
-    <key>CFBundleVersion</key>             <string>2.2.0</string><!--VERSION-->
+    <key>CFBundleShortVersionString</key>  <string>2.2.1</string><!--VERSION-->
+    <key>CFBundleVersion</key>             <string>2.2.1</string><!--VERSION-->
     <key>CFBundleIconFile</key>            <string>AppIcon</string>
     <key>CFBundleDevelopmentRegion</key>   <string>en</string>
     <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>

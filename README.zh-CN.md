@@ -17,6 +17,14 @@ $ lidkeep off      # 屏幕熄灭，系统继续跑
 $ lidkeep on       # 恢复显示（SSH 里执行同样有效）
 ```
 
+## 2.2.1 更新了什么
+
+- **设置面板重做** —— 四个标签页（通用 / 热键 / 电池 / 其他），每页可滚动，分组改成卡片式，扫一眼就能找到要改的那一项。
+- **热键随意录** —— 点一下录入框、直接按你要的组合键即可：不用勾修饰键，不用从预设列表里挑；全局热键也能整个关掉。
+- **电量下限自己定** —— 0–100% 任意滑块（原本是 6 档预设），并且可以选触底之后干什么：恢复屏幕 / 恢复屏幕**并**撤销防睡眠（回到系统原本的电池行为）/ 只提醒不干预。
+
+v2.2.0 加入了后台静默检查更新 —— 菜单栏 `⬆` 徽标，不弹窗打扰。
+
 ## 你是不是也遇到过这些
 
 | # | 场景 | 通常的结果 |
@@ -229,7 +237,7 @@ xattr -dr com.apple.quarantine /Applications/LidKeep.app
 （SHA-256 相符、长度完整），速度约 **173 KB/s**：
 
 ```bash
-V=2.2.0
+V=2.2.1
 curl -L -O "https://gh-proxy.com/https://github.com/Mihooni/lidkeep/releases/download/v$V/LidKeep-$V.dmg"
 shasum -a 256 "LidKeep-$V.dmg"   # 必须与 Release 里的 SHA256SUMS 一致
 ```
