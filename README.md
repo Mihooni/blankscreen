@@ -410,6 +410,15 @@ the menu bar app is live, since that would interrupt your session). Set `SMOKE_F
 - **Blackout is not a lock screen.** While blacked out, anyone with physical access to the
   keyboard can still operate the machine — they just can't see it. Lock manually (⌃⌘Q).
 
+## Support this project
+
+If this project saves you time, buying me a coffee keeps it going ☕
+
+<p align="center">
+  <img src="docs/donate-wechat.png" alt="WeChat Pay" width="220">&nbsp;&nbsp;
+  <img src="docs/donate-alipay.jpg" alt="Alipay" width="220">
+</p>
+
 ## License
 
 [MIT](LICENSE)
